@@ -24,7 +24,7 @@ if [[ "$#" -lt 1 ]]; then
     exit 1
 fi
 
-# --- CORRECTED LINE: Convert target to an absolute path ---
+# --- Convert target to an absolute path ---
 # This ensures that no matter where the script or target is, the path is correct.
 TARGET_EXECUTABLE=("$@")
 TARGET_EXECUTABLE[0]="$(realpath "${TARGET_EXECUTABLE[0]}")"
@@ -38,7 +38,10 @@ fi
 step "STEP 1: Verifying System Dependencies"
 INSTALLER="${SCRIPT_DIR}/install_deps.sh"
 [[ -f "$INSTALLER" ]] || { echo "Installer not found: $INSTALLER"; exit 1; }
-bash "$INSTALLER" # This script is idempotent, so it's safe to run every time.
+#
+# Pass the arguments to the installer script to prevent the "No target" error.
+#
+bash "$INSTALLER" "${TARGET_EXECUTABLE[@]}"
 # Source the environment for the rest of this script's execution
 source ~/.bashrc &>/dev/null || true
 
