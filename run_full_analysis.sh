@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Master Workflow: install_deps → load env → build FullRNS-HEAAN → roofline
-# Ubuntu 22.04 / Debian 12. Non-interactive. Safe to re-run.
+# Target: Ubuntu 22.04 on Intel bare metal (e.g., c7i.metal). Safe to re-run.
 # ==============================================================================
 
 set -Eeuo pipefail
@@ -17,7 +17,17 @@ warn() { printf "${YELLOW}⚠ %s${RESET}\n" "$1"; }
 die()  { printf "${RED}✖ %s${RESET}\n" "$1"; exit 1; }
 trap 'die "Failed at: ${BASH_COMMAND}"' ERR
 
-# ---------- Paths / config (locked to install_deps.sh) ----------
+# ---------- Non-interactive apt behavior ----------
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+
+# ---------- Sudo (no prompts) ----------
+SUDO=""
+if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+  SUDO="sudo -n"
+fi
+
+# ---------- Paths / config ----------
 SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &>/dev/null && pwd )"
 INSTALLER="${INSTALLER:-$SCRIPT_DIR/install_deps.sh}"
 [[ -f "$INSTALLER" ]] || die "Installer not found: $INSTALLER"
@@ -37,25 +47,31 @@ fi
 CLI_ARGS=("$@")
 EXTRA_ARGS=("${ENV_ARGS[@]}" "${CLI_ARGS[@]}")
 
+# ---------- Preflight checks ----------
+step "PRECHECKS"
+if systemd-detect-virt -q; then
+  warn "Virtualization detected: $(systemd-detect-virt). VTune Memory Access requires bare metal."
+fi
+if command -v lscpu >/dev/null 2>&1 && ! lscpu | grep -q 'GenuineIntel'; then
+  die "Non-Intel CPU detected. VTune collectors you need will not run."
+fi
+ok "Host looks OK (Intel CPU required; bare metal recommended)."
+
 # ---------- Step 1: Provision dependencies ----------
 step "STEP 1: Installing dependencies"
 [[ -x "$INSTALLER" ]] || chmod +x "$INSTALLER" || true
 bash "$INSTALLER"
 ok "Dependencies installed via $(basename "$INSTALLER")"
 
-# ---------- Step 2: Load environment (Go/VTune) ----------
-step "STEP 2: Loading environment (Go/VTune)"
+# ---------- Step 2: Load environment (Go / VTune) ----------
+step "STEP 2: Loading environment (Go / VTune)"
 # Go PATH for this session
 if [[ ":$PATH:" != *":/usr/local/go/bin:"* ]] && [[ -x /usr/local/go/bin/go ]]; then
   export PATH="/usr/local/go/bin:$PATH"
 fi
-if command -v go >/dev/null 2>&1; then
-  ok "Go: $(go version)"
-else
-  warn "Go not found"
-fi
+command -v go >/dev/null 2>&1 && ok "Go: $(go version)" || warn "Go not found"
 
-# VTune env if present (analysis script also self-detects/sources)
+# VTune env (driverless preferred on Sapphire Rapids)
 if [[ -f "$HOME/intel/oneapi/vtune/latest/env/vars.sh" ]]; then
   # shellcheck disable=SC1090
   source "$HOME/intel/oneapi/vtune/latest/env/vars.sh"
@@ -65,7 +81,14 @@ elif [[ -f "/opt/intel/oneapi/vtune/latest/env/vars.sh" ]]; then
   source "/opt/intel/oneapi/vtune/latest/env/vars.sh"
   ok "VTune env sourced (system)"
 else
-  warn "VTune env not found; proceeding (analysis script will try again)"
+  die "VTune env not found. Ensure intel-oneapi-vtune is installed."
+fi
+command -v vtune >/dev/null 2>&1 && ok "VTune: $(vtune -version | head -n1)"
+
+# Best-effort counter access + optional symbol unrestriction (no prompts)
+if [[ -n "$SUDO" ]]; then
+  $SUDO sysctl -w kernel.perf_event_paranoid=0 >/dev/null 2>&1 || true
+  $SUDO sysctl -w kernel.kptr_restrict=0      >/dev/null 2>&1 || true
 fi
 
 # Also source .bashrc (harmless if missing)
@@ -94,7 +117,6 @@ make -j"$NCORES"
 ok "Built run targets"
 
 # Detect the executable:
-# 1) prefer FRNSHEAAN if present; else 2) newest user-executable in run/
 TARGET_EXECUTABLE=""
 if [[ -x "$RUN_DIR/FRNSHEAAN" ]]; then
   TARGET_EXECUTABLE="$RUN_DIR/FRNSHEAAN"
@@ -114,7 +136,7 @@ popd >/dev/null
 
 echo "Build complete. Target executable is: ${TARGET_EXECUTABLE}"
 
-# ---------- Step 4: Roofline analysis ----------
+# ---------- Step 4: Roofline analysis (VTune-only) ----------
 step "STEP 4: RUNNING PERFORMANCE ANALYSIS"
 [[ -f "$ANALYSIS_SCRIPT" ]] || die "Analysis script not found: $ANALYSIS_SCRIPT"
 [[ -x "$ANALYSIS_SCRIPT" ]] || chmod +x "$ANALYSIS_SCRIPT" || true

@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # HEAAN Analysis: OS-aware dependency installer (Ubuntu 22.04 / Debian 12)
-# Installs: core build deps, NTL, Go, perf/cpupower, Intel oneAPI VTune
+# Installs: core build deps, NTL, Go, perf tools, Intel oneAPI VTune (driverless),
+#           optional SEP driver (best-effort, non-blocking)
 # Re-runnable. Non-interactive. Versions/URLs overridable via env vars.
 # ==============================================================================
 
 set -Eeuo pipefail
 IFS=$'\n\t'
 export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
 
 # ---- Versions / URLs (override via env) --------------------------------------
 NTL_VERSION="${NTL_VERSION:-11.5.1}"
 GO_VERSION="${GO_VERSION:-1.22.3}"
 REPO_URL="${REPO_URL:-https://github.com/KyoohyungHan/FullRNS-HEAAN.git}"
 REPO_DIR="${REPO_DIR:-$HOME/FullRNS-HEAAN}"
+
+# Optional: build/load VTune SEP driver (driverless is preferred on c7i.metal)
+BUILD_VTUNE_SEP="${BUILD_VTUNE_SEP:-0}"
 
 # ---- UI helpers --------------------------------------------------------------
 BOLD=$(tput bold 2>/dev/null || true); RESET=$(tput sgr0 2>/dev/null || true)
@@ -58,8 +63,8 @@ ok "apt lists updated"
 # ---- Step 3: core system + perf tools (OS-aware) ----------------------------
 step 3 "Installing core build deps and performance tools"
 sudo apt-get install -y -q \
-  build-essential cmake git wget curl ca-certificates unzip pkg-config \
-  libgmp-dev libssl-dev gnupg lsb-release \
+  build-essential cmake git wget curl ca-certificates unzip pkg-config clang \
+  libgmp-dev libssl-dev gnupg lsb-release kmod \
   python3 python3-pip python3-venv \
   bc
 
@@ -136,12 +141,12 @@ else
   ok "Repo cloned to $REPO_DIR"
 fi
 
-# ---- Step 7: Intel oneAPI VTune (APT) + perf/uncore setup --------------------
-step 7 "Installing Intel oneAPI VTune and enabling perf uncore access"
+# ---- Step 7: Intel oneAPI VTune (APT) + driverless perf setup ----------------
+step 7 "Installing Intel oneAPI VTune and enabling counter access"
 if [[ "$ARCH_DEB" != "amd64" ]]; then
   warn "Non-x86_64 architecture ($ARCH_DEB) — skipping VTune install"
 else
-  # 7.1 Install or refresh the Intel key and repo (idempotent)
+  # 7.1 Key + repo (idempotent)
   sudo install -m 0755 -d /usr/share/keyrings
   curl -fsSL https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
     | gpg --dearmor | sudo tee "$ONEAPI_KEY" >/dev/null
@@ -151,26 +156,38 @@ else
   sudo apt-get update -y -o Acquire::Retries=3
   sudo apt-get install -y -q intel-oneapi-vtune
 
-  # 7.2 Ensure vtune env auto-loads in new shells
+  # 7.2 VTune env in new shells
   VTUNE_ENV_SYS="/opt/intel/oneapi/vtune/latest/env/vars.sh"
   [[ -f "$VTUNE_ENV_SYS" ]] && append_once "$HOME/.bashrc" "source \"$VTUNE_ENV_SYS\" 2>/dev/null || true"
 
-  # 7.3 Allow driverless perf + uncore
+  # 7.3 Driverless-friendly sysctls
   sudo mkdir -p /etc/sysctl.d
   echo "kernel.perf_event_paranoid=0" | sudo tee /etc/sysctl.d/99-perf.conf >/dev/null
+  echo "kernel.kptr_restrict=0"       | sudo tee /etc/sysctl.d/99-kptr.conf >/dev/null
   sudo sysctl --system >/dev/null || true
 
-  # 7.4 Best-effort SEP driver (optional)
-  if sudo apt-get install -y -q "linux-headers-$(uname -r)"; then
-    if [[ -x /opt/intel/oneapi/vtune/latest/bin64/vtune-sepdk-setup.sh ]]; then
-      sudo /opt/intel/oneapi/vtune/latest/bin64/vtune-sepdk-setup.sh --install-driver || \
-        warn "SEP driver setup failed; continuing with perf-only mode"
-      sudo systemctl restart sep5 || true
+  ok "VTune installed and driverless access configured"
+
+  # 7.4 Optional: SEP driver (best-effort, non-blocking). Needed only if
+  #      you require cacheline/object attribution or if driverless fails.
+  if [[ "$BUILD_VTUNE_SEP" == "1" ]]; then
+    step "7a" "Building/loading VTune SEP driver (optional)"
+    sudo apt-get install -y -q "linux-headers-$(uname -r)" || true
+    SEP_SRC="$(find /opt/intel/oneapi/vtune/latest -type d -path '*/sepdk/src' | head -n1 || true)"
+    if [[ -n "$SEP_SRC" ]]; then
+      # Non-interactive build; force clang to avoid GCC flag issues
+      printf '\n' | sudo CC=clang "$SEP_SRC/build-driver" 2>/dev/null || sudo make -C "$SEP_SRC" CC=clang || true
+      # Load whichever insmod script exists
+      for s in insmod-sep5 insmod-sep3 insmod-sep; do
+        [[ -x "$SEP_SRC/$s" ]] && { sudo "$SEP_SRC/$s" && break; }
+      done
+      # Access for current user if group exists
+      getent group vtune >/dev/null 2>&1 && sudo usermod -aG vtune "$USER" || true
+      ok "SEP attempted (best-effort). If it failed, driverless mode still works on c7i.metal."
+    else
+      warn "VTune SEP sources not found; skipping driver build"
     fi
-  else
-    warn "Kernel headers for $(uname -r) not found; using perf-only mode"
   fi
-  ok "VTune installed and perf access configured"
 fi
 
 # ---- Step 8: Finalize --------------------------------------------------------

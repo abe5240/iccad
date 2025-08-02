@@ -2,8 +2,9 @@
 # ==============================================================================
 # Roofline Metrics (VTune-only)
 # - Numerator  : Instructions Retired (uarch-exploration)
-# - Denominator: DRAM bytes from DRAM GB/s * elapsed (memory-access)
-# Exits non-zero if VTune is unavailable or a VTune step fails.
+# - Denominator: DRAM bytes = (DRAM GB/s from memory-access) * elapsed (s) * 1e9
+# Fails if VTune is unavailable or any VTune collection/report fails.
+# Works on Intel bare metal (e.g., AWS c7i.metal). No perf(1) fallback.
 # ==============================================================================
 
 set -Eeuo pipefail
@@ -24,7 +25,7 @@ cleanup() {
 }
 die() { echo "✖ $*" >&2; exit 1; }
 
-# Gate sudo usage: only if passwordless sudo is available
+# Gate sudo usage: only if passwordless sudo is available (no prompts)
 SUDO=""
 if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
   SUDO="sudo -n"
@@ -41,6 +42,14 @@ reset_governor() {
 
 trap 'reset_governor; cleanup; exit' SIGHUP SIGINT SIGTERM
 trap 'cleanup' EXIT
+
+# ---------- fast-fail checks ----------
+if command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt -q; then
+  die "VTune Memory Access requires bare metal. Detected virtualization: $(systemd-detect-virt)"
+fi
+if command -v lscpu >/dev/null 2>&1 && ! lscpu | grep -q 'GenuineIntel'; then
+  die "Non-Intel CPU detected. VTune collectors required here will not run."
+fi
 
 # ---------- locate VTune (required) ----------
 find_vtune() {
@@ -64,7 +73,13 @@ if [[ -z "$VTUNE_BIN" ]]; then
 fi
 [[ -n "$VTUNE_BIN" ]] || die "VTune CLI not found. Install intel-oneapi-vtune."
 
-# ---------- optional CPU governor tweak (best-effort, no prompts) ----------
+# ---------- best-effort counter access (no prompts) ----------
+if [[ -n "$SUDO" ]]; then
+  $SUDO sysctl -w kernel.perf_event_paranoid=0 >/dev/null 2>&1 || true
+  $SUDO sysctl -w kernel.kptr_restrict=0      >/dev/null 2>&1 || true
+fi
+
+# Optional CPU governor tweak (best-effort, no prompts)
 CPUPOWER_CMD="$(command -v cpupower || true)"
 if [[ -n "$CPUPOWER_CMD" && -n "$SUDO" ]]; then
   $SUDO "$CPUPOWER_CMD" -c all frequency-set -g performance >/dev/null 2>&1 \
@@ -92,6 +107,7 @@ ELAPSED_TIME="$(
 )"
 [[ -n "$ELAPSED_TIME" ]] || die "Failed to parse Elapsed Time."
 
+# Prefer CSV for 'Instructions Retired'; fall back to text if needed
 TOTAL_OPS="$(
   "$VTUNE_BIN" -report summary -result-dir "$VTUNE_UARCH_DIR" \
     -format csv -csv-delimiter=, \
@@ -99,6 +115,13 @@ TOTAL_OPS="$(
              /Instructions Retired/ {gsub(/"|,/,"",$2); v=$2}
              END{if (v=="") v=0; print v}'
 )"
+if [[ -z "$TOTAL_OPS" || "$TOTAL_OPS" == "0" ]]; then
+  TOTAL_OPS="$(
+    "$VTUNE_BIN" -report summary -result-dir "$VTUNE_UARCH_DIR" -format text \
+    | awk 'BEGIN{IGNORECASE=1}
+           /Instructions Retired/ {for(i=1;i<=NF;i++) if ($i ~ /^[0-9.,]+$/){gsub(/,/,"",$i); print $i; exit}}'
+  )"
+fi
 [[ -n "$TOTAL_OPS" && "$TOTAL_OPS" != "0" ]] || die "Failed to obtain Instructions Retired."
 
 echo "Elapsed Time (s): $ELAPSED_TIME"
