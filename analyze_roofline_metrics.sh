@@ -2,7 +2,7 @@
 # ==============================================================================
 # Roofline Metrics (VTune-only)
 # - Numerator  : Instructions Retired (uarch-exploration)
-# - Denominator: DRAM bytes = (DRAM GB/s from memory-access) * elapsed (s) * 1e9
+# - Denominator: DRAM bytes = (Average DRAM GB/s from memory-access) * elapsed (s) * 1e9
 # Fails if VTune is unavailable or any VTune collection/report fails.
 # Works on Intel bare metal (e.g., AWS c7i.metal). No perf(1) fallback.
 # ==============================================================================
@@ -101,24 +101,15 @@ if [[ $rc_uarch -ne 0 ]]; then
   die "VTune uarch-exploration failed (rc=$rc_uarch). See logs above."
 fi
 
-# --- [DEBUG] Get report and check for errors before parsing
 UARCH_REPORT="$( "$VTUNE_BIN" -report summary -result-dir "$VTUNE_UARCH_DIR" -format text )"
 
-ELAPSED_TIME="$(echo "$UARCH_REPORT" | awk '/Elapsed Time/ {print $NF}')"
-if [[ ! "$ELAPSED_TIME" =~ ^[0-9] ]]; then
-  echo "--- VTUNE UARCH REPORT (DEBUG) ---" >&2
-  echo "$UARCH_REPORT" >&2
-  echo "------------------------------------" >&2
-  die "Failed to parse Elapsed Time from VTune report. Check the report output above and 'vtune_uarch.err' for details."
-fi
+# Robustly parse 'Elapsed Time: ...s' by removing the trailing 's'
+ELAPSED_TIME="$(echo "$UARCH_REPORT" | awk '/^Elapsed Time:/ {gsub(/s/,"", $NF); print $NF}')"
+[[ "$ELAPSED_TIME" =~ ^[0-9] ]] || die "Failed to parse Elapsed Time from uarch-exploration report."
 
-TOTAL_OPS="$(echo "$UARCH_REPORT" | awk '/Instructions Retired/ {print $NF}')"
-if [[ ! "$TOTAL_OPS" =~ ^[0-9] ]]; then
-  echo "--- VTUNE UARCH REPORT (DEBUG) ---" >&2
-  echo "$UARCH_REPORT" >&2
-  echo "------------------------------------" >&2
-  die "Failed to parse Instructions Retired from VTune report. Check the report output above."
-fi
+# Robustly parse 'Instructions Retired: ...' by removing commas
+TOTAL_OPS="$(echo "$UARCH_REPORT" | awk '/^Instructions Retired:/ {gsub(/,/,"", $NF); print $NF}')"
+[[ "$TOTAL_OPS" =~ ^[0-9] ]] || die "Failed to parse Instructions Retired from uarch-exploration report."
 
 echo "Elapsed Time (s): $ELAPSED_TIME"
 echo "Instructions Retired: $TOTAL_OPS"
@@ -135,24 +126,15 @@ if [[ $rc_mem -ne 0 ]]; then
   die "VTune memory-access failed (rc=$rc_mem). See logs above."
 fi
 
-# --- [DEBUG] Get report and check for errors before parsing
 MEM_REPORT="$( "$VTUNE_BIN" -report summary -result-dir "$VTUNE_MEM_DIR" -format text )"
 
-DRAM_BW_GBS="$(echo "$MEM_REPORT" | awk '/DRAM Bandwidth/ {print $NF}')"
-if [[ ! "$DRAM_BW_GBS" =~ ^[0-9] ]]; then
-  echo "--- VTUNE MEMORY REPORT (DEBUG) ---" >&2
-  echo "$MEM_REPORT" >&2
-  echo "-------------------------------------" >&2
-  die "Failed to parse DRAM Bandwidth (GB/s). Check the report output above and 'vtune_mem.err' for details."
-fi
+# Precisely parse 'DRAM, GB/sec' table, getting the 5th field (Average)
+DRAM_BW_GBS="$(echo "$MEM_REPORT" | awk '/^DRAM, GB\/sec/ {print $5}')"
+[[ "$DRAM_BW_GBS" =~ ^[0-9] ]] || die "Failed to parse DRAM Bandwidth (GB/s) from memory-access report."
 
-MEM_ELAPSED_TIME="$(echo "$MEM_REPORT" | awk '/Elapsed Time/ {print $NF}')"
-if [[ ! "$MEM_ELAPSED_TIME" =~ ^[0-9] ]]; then
-  echo "--- VTUNE MEMORY REPORT (DEBUG) ---" >&2
-  echo "$MEM_REPORT" >&2
-  echo "-------------------------------------" >&2
-  die "Failed to parse memory-access elapsed time. Check the report output above."
-fi
+# Robustly parse 'Elapsed Time: ...s' by removing the trailing 's'
+MEM_ELAPSED_TIME="$(echo "$MEM_REPORT" | awk '/^Elapsed Time:/ {gsub(/s/,"", $NF); print $NF}')"
+[[ "$MEM_ELAPSED_TIME" =~ ^[0-9] ]] || die "Failed to parse elapsed time from memory-access report."
 
 TOTAL_BYTES="$(printf "%.0f" "$(calc "$DRAM_BW_GBS * $MEM_ELAPSED_TIME * 1e9")")"
 
