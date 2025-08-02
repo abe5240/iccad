@@ -28,8 +28,14 @@ RUN_DIR="$REPO_DIR/run"
 ANALYSIS_SCRIPT="${ANALYSIS_SCRIPT:-$SCRIPT_DIR/analyze_roofline_metrics.sh}"
 NCORES="$(command -v nproc >/dev/null 2>&1 && nproc || echo 1)"
 
-# Optional args forwarded to the target binary
-TARGET_ARGS="${TARGET_ARGS:-}"
+# ---------- Forwarded args (ENV + CLI, preserves quoting) ----------
+ENV_ARGS=()
+if [[ -n "${TARGET_ARGS:-}" ]]; then
+  # shellcheck disable=SC2206
+  ENV_ARGS=($TARGET_ARGS)
+fi
+CLI_ARGS=("$@")
+EXTRA_ARGS=("${ENV_ARGS[@]}" "${CLI_ARGS[@]}")
 
 # ---------- Step 1: Provision dependencies ----------
 step "STEP 1: Installing dependencies"
@@ -43,7 +49,11 @@ step "STEP 2: Loading environment (Go/VTune)"
 if [[ ":$PATH:" != *":/usr/local/go/bin:"* ]] && [[ -x /usr/local/go/bin/go ]]; then
   export PATH="/usr/local/go/bin:$PATH"
 fi
-command -v go >/dev/null 2>&1 && ok "Go: $(go version)" || warn "Go not found"
+if command -v go >/dev/null 2>&1; then
+  ok "Go: $(go version)"
+else
+  warn "Go not found"
+fi
 
 # VTune env if present (analysis script also self-detects/sources)
 if [[ -f "$HOME/intel/oneapi/vtune/latest/env/vars.sh" ]]; then
@@ -89,8 +99,13 @@ TARGET_EXECUTABLE=""
 if [[ -x "$RUN_DIR/FRNSHEAAN" ]]; then
   TARGET_EXECUTABLE="$RUN_DIR/FRNSHEAAN"
 else
-  TARGET_EXECUTABLE="$(find "$RUN_DIR" -maxdepth 1 -type f -perm -u=x -printf '%T@ %p\n' \
-                       | sort -nr | awk 'NR==1{print $2}')" || true
+  TARGET_EXECUTABLE="$(
+    find "$RUN_DIR" -maxdepth 1 -type f -perm -u=x -printf '%T@ %p\n' 2>/dev/null \
+      | sort -nr | awk 'NR==1{print $2}'
+  )"
+  if [[ -z "$TARGET_EXECUTABLE" ]]; then
+    TARGET_EXECUTABLE="$(ls -t "$RUN_DIR"/* 2>/dev/null | head -n1 || true)"
+  fi
 fi
 popd >/dev/null
 
@@ -104,6 +119,6 @@ step "STEP 4: RUNNING PERFORMANCE ANALYSIS"
 [[ -f "$ANALYSIS_SCRIPT" ]] || die "Analysis script not found: $ANALYSIS_SCRIPT"
 [[ -x "$ANALYSIS_SCRIPT" ]] || chmod +x "$ANALYSIS_SCRIPT" || true
 
-bash "$ANALYSIS_SCRIPT" "$TARGET_EXECUTABLE" $TARGET_ARGS
+bash "$ANALYSIS_SCRIPT" "$TARGET_EXECUTABLE" "${EXTRA_ARGS[@]}"
 
 printf "\n${BOLD}${GREEN}DONE${RESET}\n"
