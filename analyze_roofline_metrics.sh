@@ -21,7 +21,8 @@ TARGET=("$@") # preserve quoting
 # ---------- helpers ----------
 calc() { awk "BEGIN{print ($*)}"; }
 cleanup() {
-  [[ "${KEEP_RESULTS:-0}" == 1 ]] || rm -rf "$VTUNE_UARCH_DIR" "$VTUNE_MEM_DIR" || true
+  # Respect KEEP_RESULTS=1 to aid in debugging
+  [[ "${KEEP_RESULTS:-0}" == 1 ]] || rm -rf "$VTUNE_UARCH_DIR" "$VTUNE_MEM_DIR" vtune_*.out vtune_*.err || true
 }
 die() { echo "✖ $*" >&2; exit 1; }
 
@@ -103,12 +104,12 @@ fi
 
 UARCH_REPORT="$( "$VTUNE_BIN" -report summary -result-dir "$VTUNE_UARCH_DIR" -format text )"
 
-# Robustly parse 'Elapsed Time: ...s' by removing the trailing 's'
-ELAPSED_TIME="$(echo "$UARCH_REPORT" | awk '/^Elapsed Time:/ {gsub(/s/,"", $NF); print $NF}')"
+# Robustly parse 'Elapsed Time: ...s' by removing the trailing 's'. Does not anchor to start of line.
+ELAPSED_TIME="$(echo "$UARCH_REPORT" | awk '/Elapsed Time:/ {gsub(/s/,"", $NF); print $NF; exit}')"
 [[ "$ELAPSED_TIME" =~ ^[0-9] ]] || die "Failed to parse Elapsed Time from uarch-exploration report."
 
-# Robustly parse 'Instructions Retired: ...' by removing commas
-TOTAL_OPS="$(echo "$UARCH_REPORT" | awk '/^Instructions Retired:/ {gsub(/,/,"", $NF); print $NF}')"
+# Robustly parse 'Instructions Retired: ...' by removing commas. Does not anchor to start of line.
+TOTAL_OPS="$(echo "$UARCH_REPORT" | awk '/Instructions Retired:/ {gsub(/,/,"", $NF); print $NF; exit}')"
 [[ "$TOTAL_OPS" =~ ^[0-9] ]] || die "Failed to parse Instructions Retired from uarch-exploration report."
 
 echo "Elapsed Time (s): $ELAPSED_TIME"
@@ -128,12 +129,12 @@ fi
 
 MEM_REPORT="$( "$VTUNE_BIN" -report summary -result-dir "$VTUNE_MEM_DIR" -format text )"
 
-# Precisely parse 'DRAM, GB/sec' table, getting the 5th field (Average)
-DRAM_BW_GBS="$(echo "$MEM_REPORT" | awk '/^DRAM, GB\/sec/ {print $5}')"
+# Precisely parse 'DRAM, GB/sec' table, getting the 5th field (Average). Does not anchor to start of line.
+DRAM_BW_GBS="$(echo "$MEM_REPORT" | awk '/DRAM, GB\/sec/ {print $5; exit}')"
 [[ "$DRAM_BW_GBS" =~ ^[0-9] ]] || die "Failed to parse DRAM Bandwidth (GB/s) from memory-access report."
 
-# Robustly parse 'Elapsed Time: ...s' by removing the trailing 's'
-MEM_ELAPSED_TIME="$(echo "$MEM_REPORT" | awk '/^Elapsed Time:/ {gsub(/s/,"", $NF); print $NF}')"
+# Robustly parse 'Elapsed Time: ...s'. Does not anchor to start of line.
+MEM_ELAPSED_TIME="$(echo "$MEM_REPORT" | awk '/Elapsed Time:/ {gsub(/s/,"", $NF); print $NF; exit}')"
 [[ "$MEM_ELAPSED_TIME" =~ ^[0-9] ]] || die "Failed to parse elapsed time from memory-access report."
 
 TOTAL_BYTES="$(printf "%.0f" "$(calc "$DRAM_BW_GBS * $MEM_ELAPSED_TIME * 1e9")")"
