@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Roofline Metrics (VTune-only)
-# - Numerator  : Instructions Retired (from uarch-exploration)
-# - Denominator: DRAM bytes = (DRAM GB/s from memory-access) * elapsed (s) * 1e9
-# Exits non-zero if VTune is unavailable or a collection/report fails.
+# - Numerator  : Instructions Retired (uarch-exploration)
+# - Denominator: DRAM bytes from DRAM GB/s * elapsed (memory-access)
+# Exits non-zero if VTune is unavailable or a VTune step fails.
 # ==============================================================================
 
 set -Eeuo pipefail
@@ -14,26 +14,30 @@ VTUNE_UARCH_DIR="vtune_uarch_results"
 VTUNE_MEM_DIR="vtune_memory_results"
 OUTPUT_LOG_FILE="roofline_data.log"
 
-if [[ $# -lt 1 ]]; then
-  echo "Error: No target program specified." >&2
-  exit 1
-fi
+[[ $# -ge 1 ]] || { echo "Error: no target specified." >&2; exit 1; }
 TARGET=("$@")  # preserve quoting
 
 # ---------- helpers ----------
-calc() { awk "BEGIN{print ($*)}"; }  # float arithmetic
+calc() { awk "BEGIN{print ($*)}"; }
 cleanup() {
   [[ "${KEEP_RESULTS:-0}" == 1 ]] || rm -rf "$VTUNE_UARCH_DIR" "$VTUNE_MEM_DIR" || true
 }
+die() { echo "✖ $*" >&2; exit 1; }
+
+# Gate sudo usage: only if passwordless sudo is available
+SUDO=""
+if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+  SUDO="sudo -n"
+fi
+
 reset_governor() {
-  if [[ -n "${CPUPOWER_CMD:-}" ]]; then
-    sudo "$CPUPOWER_CMD" -c all frequency-set -g ondemand >/dev/null 2>&1 \
-      || sudo "$CPUPOWER_CMD"  frequency-set -g ondemand >/dev/null 2>&1 \
-      || sudo "$CPUPOWER_CMD" -c all frequency-set -g powersave >/dev/null 2>&1 \
-      || sudo "$CPUPOWER_CMD"  frequency-set -g powersave >/dev/null 2>&1 || true
+  if [[ -n "${CPUPOWER_CMD:-}" && -n "$SUDO" ]]; then
+    $SUDO "$CPUPOWER_CMD" -c all frequency-set -g ondemand >/dev/null 2>&1 \
+      || $SUDO "$CPUPOWER_CMD"  frequency-set -g ondemand >/dev/null 2>&1 \
+      || $SUDO "$CPUPOWER_CMD" -c all frequency-set -g powersave >/dev/null 2>&1 \
+      || $SUDO "$CPUPOWER_CMD"  frequency-set -g powersave >/dev/null 2>&1 || true
   fi
 }
-die() { echo "✖ $*" >&2; exit 1; }
 
 trap 'reset_governor; cleanup; exit' SIGHUP SIGINT SIGTERM
 trap 'cleanup' EXIT
@@ -46,10 +50,9 @@ find_vtune() {
 }
 VTUNE_BIN="$(find_vtune || true)"
 if [[ -z "$VTUNE_BIN" ]]; then
-  HOME_DIR=$(getent passwd "${SUDO_USER:-$USER}" | cut -d: -f6)
   for envfile in \
-    "$HOME_DIR/intel/oneapi/vtune/latest/env/vars.sh" \
-    "$HOME_DIR/intel/oneapi/setvars.sh" \
+    "$HOME/intel/oneapi/vtune/latest/env/vars.sh" \
+    "$HOME/intel/oneapi/setvars.sh" \
     "/opt/intel/oneapi/vtune/latest/env/vars.sh" \
     "/opt/intel/oneapi/setvars.sh"
   do
@@ -61,12 +64,11 @@ if [[ -z "$VTUNE_BIN" ]]; then
 fi
 [[ -n "$VTUNE_BIN" ]] || die "VTune CLI not found. Install intel-oneapi-vtune."
 
-# ---------- optional CPU governor tweak (best-effort) ----------
+# ---------- optional CPU governor tweak (best-effort, no prompts) ----------
 CPUPOWER_CMD="$(command -v cpupower || true)"
-if [[ -n "$CPUPOWER_CMD" ]]; then
-  sudo -v || true
-  sudo "$CPUPOWER_CMD" -c all frequency-set -g performance >/dev/null 2>&1 \
-    || sudo "$CPUPOWER_CMD"  frequency-set -g performance >/dev/null 2>&1 || true
+if [[ -n "$CPUPOWER_CMD" && -n "$SUDO" ]]; then
+  $SUDO "$CPUPOWER_CMD" -c all frequency-set -g performance >/dev/null 2>&1 \
+    || $SUDO "$CPUPOWER_CMD"  frequency-set -g performance >/dev/null 2>&1 || true
 fi
 
 echo "======================================================================"
@@ -84,25 +86,18 @@ rc_uarch=$?
 set -e
 [[ $rc_uarch -eq 0 ]] || die "VTune uarch-exploration failed (rc=$rc_uarch). See vtune_uarch.err"
 
-# Elapsed time (seconds)
 ELAPSED_TIME="$(
   "$VTUNE_BIN" -report summary -result-dir "$VTUNE_UARCH_DIR" -format text \
   | awk '/Elapsed Time/ {for(i=1;i<=NF;i++) if ($i ~ /^[0-9.]+$/){print $i; exit}}'
 )"
-[[ -n "$ELAPSED_TIME" ]] || die "Failed to parse Elapsed Time from uarch-exploration report."
+[[ -n "$ELAPSED_TIME" ]] || die "Failed to parse Elapsed Time."
 
-# Instructions Retired (total)
 TOTAL_OPS="$(
   "$VTUNE_BIN" -report summary -result-dir "$VTUNE_UARCH_DIR" \
     -format csv -csv-delimiter=, \
   | awk -F, 'BEGIN{IGNORECASE=1}
-             /Instructions Retired/ {gsub(/"/,"",$2); gsub(/,/,"",$2); v=$2}
+             /Instructions Retired/ {gsub(/"|,/,"",$2); v=$2}
              END{if (v=="") v=0; print v}'
-)"
-[[ "$TOTAL_OPS" != "0" ]] || TOTAL_OPS="$(
-  "$VTUNE_BIN" -report summary -result-dir "$VTUNE_UARCH_DIR" -format text \
-  | awk 'BEGIN{IGNORECASE=1}
-         /Instructions Retired/ {for(i=1;i<=NF;i++) if ($i ~ /^[0-9.,]+$/){gsub(/,/,"",$i); print $i; exit}}'
 )"
 [[ -n "$TOTAL_OPS" && "$TOTAL_OPS" != "0" ]] || die "Failed to obtain Instructions Retired."
 
@@ -118,7 +113,6 @@ rc_mem=$?
 set -e
 [[ $rc_mem -eq 0 ]] || die "VTune memory-access failed (rc=$rc_mem). See vtune_mem.err"
 
-# DRAM GB/s and elapsed time for memory-access run
 DRAM_BW_GBS="$(
   "$VTUNE_BIN" -report summary -result-dir "$VTUNE_MEM_DIR" -format text \
   | awk 'BEGIN{IGNORECASE=1}
@@ -130,22 +124,15 @@ MEM_ELAPSED_TIME="$(
   "$VTUNE_BIN" -report summary -result-dir "$VTUNE_MEM_DIR" -format text \
   | awk '/Elapsed Time/ {for(i=1;i<=NF;i++) if ($i ~ /^[0-9.]+$/){print $i; exit}}'
 )"
-[[ -n "$MEM_ELAPSED_TIME" ]] || die "Failed to parse Elapsed Time for memory-access."
+[[ -n "$MEM_ELAPSED_TIME" ]] || die "Failed to parse memory-access elapsed time."
 
 TOTAL_BYTES="$(printf "%.0f" "$(calc "$DRAM_BW_GBS * $MEM_ELAPSED_TIME * 1e9")")"
 
 # ---------------- Metrics ----------------
-if [[ "$ELAPSED_TIME" == "0" ]]; then
-  GIOPS="inf"
-else
-  GIOPS="$(calc "($TOTAL_OPS / $ELAPSED_TIME) / 1e9")"
-fi
-
-if [[ "$TOTAL_BYTES" == "0" ]]; then
-  ARITHMETIC_INTENSITY="inf"
-else
-  ARITHMETIC_INTENSITY="$(calc "$TOTAL_OPS / $TOTAL_BYTES")"
-fi
+GIOPS="$( [[ "$ELAPSED_TIME" == "0" ]] && echo inf \
+          || calc "($TOTAL_OPS / $ELAPSED_TIME) / 1e9" )"
+ARITHMETIC_INTENSITY="$( [[ "$TOTAL_BYTES" == "0" ]] && echo inf \
+                         || calc "$TOTAL_OPS / $TOTAL_BYTES" )"
 
 # ---------------- Output ----------------
 {
