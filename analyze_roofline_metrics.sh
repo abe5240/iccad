@@ -16,7 +16,7 @@ VTUNE_MEM_DIR="vtune_memory_results"
 OUTPUT_LOG_FILE="roofline_data.log"
 
 [[ $# -ge 1 ]] || { echo "Error: no target specified." >&2; exit 1; }
-TARGET=("$@")  # preserve quoting
+TARGET=("$@") # preserve quoting
 
 # ---------- helpers ----------
 calc() { awk "BEGIN{print ($*)}"; }
@@ -44,9 +44,12 @@ trap 'reset_governor; cleanup; exit' SIGHUP SIGINT SIGTERM
 trap 'cleanup' EXIT
 
 # ---------- fast-fail checks ----------
-if command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt -q; then
-  die "VTune Memory Access requires bare metal. Detected virtualization: $(systemd-detect-virt)"
-fi
+# This check is too strict for AWS .metal instances, which report virtualization
+# via systemd-detect-virt but still allow the necessary hardware access for VTune.
+#
+# if command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt -q; then
+#   die "VTune Memory Access requires bare metal. Detected virtualization: $(systemd-detect-virt)"
+# fi
 if command -v lscpu >/dev/null 2>&1 && ! lscpu | grep -q 'GenuineIntel'; then
   die "Non-Intel CPU detected. VTune collectors required here will not run."
 fi
