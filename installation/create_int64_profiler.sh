@@ -91,9 +91,8 @@ RAW=$("$PIN_HOME/pin" -t "$TOOL_DIR/obj-intel64/${TOOL_NAME}.so" -- "$TEST_BIN")
 
 # ─────────── 9. parsed totals ───────────
 echo -e "\n----- Parsed totals -----"
-echo "$RAW" | grep -E '^(ADD|SUB|MUL|DIV|SIMD)'
+echo "$RAW" | grep -E '^(ADD|SUB|ADC|SBB|MULX?|ADCX|ADOX|DIV|SIMD|IMMEDIATE)'
 
 # ─────────── finished ───────────
-
-echo    ""  # blank line
+echo
 ok "Bootstrap complete (logs in $LOG_DIR)"
