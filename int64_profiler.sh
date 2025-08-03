@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ###############################################################################
-# int64profiler.sh – run Int64Profiler on any executable or script.
+# int64_profiler.sh – run Int64Profiler on any executable or script.
 #   • Default  : prints compact totals (ADD / SUB / MUL / DIV).
 #   • --verbose: prints full per-opcode report + SIMD + immediates.
 ###############################################################################
@@ -20,8 +20,8 @@ Usage: $(basename "$0") [--verbose] <target> [-- <args>...]
 Profiles 64-bit integer arithmetic via Intel Pin.
 
 Examples:
-  ./int64profiler.sh            ./my_binary
-  ./int64profiler.sh --verbose ./script.py -- arg1 arg2
+  ./int64_profiler.sh            ./my_binary
+  ./int64_profiler.sh --verbose ./script.py -- arg1 arg2
 EOF
   exit 0
 fi
