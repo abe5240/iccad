@@ -127,5 +127,22 @@ printf "Reads : %'d lines (%s)\n"  "$READS"  "$(hr_bytes $((64*READS)))"
 printf "Writes: %'d lines (%s)\n"  "$WRITES" "$(hr_bytes $((64*WRITES)))"
 printf "Total : %s\n"              "$(hr_bytes $BYTES)"
 
+# ───────── 11. Arithmetic‑intensity smoke‑test ─────────
+step "Calculating integer arithmetic intensity"
+
+# Always collect the compact 4‑line totals (cheap second run)
+AGG_RAW=$("$PIN_HOME/pin" -t "$TOOL_DIR/obj-intel64/${TOOL_NAME}.so" -- "$TEST_BIN")
+
+INT_OPS=$(echo "$AGG_RAW" | \
+          awk '/^(ADD:|SUB:|MUL:|DIV:)/ {gsub(/[,]/,"",$2); sum += $2} END{print sum+0}')
+
+AI=$(awk -v ops="$INT_OPS" -v bytes="$BYTES" \
+         'BEGIN {if (bytes==0) print "n/a"; else printf "%.3f", ops/bytes}')
+
+printf "\n--- Integer arithmetic intensity (smoke-test) ---\n"
+printf "Integer ops : %'d\n" "$INT_OPS"
+printf "DRAM bytes  : %s\n"  "$(hr_bytes $BYTES)"
+printf "Intensity   : %s ops/byte\n" "$AI"
+
 echo
-ok "Installation complete ✅  (log: $LOG)"
+ok "Installation complete (log: $LOG)"
