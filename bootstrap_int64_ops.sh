@@ -1,84 +1,85 @@
 #!/usr/bin/env bash
-# ──────────────────────────────────────────────────────────────────────────────
-#  bootstrap_int64_ops.sh
-#  End‑to‑end installer / builder / smoke‑tester for the “int64_ops” Pin tool.
-#
-#  ▸ Works on a pristine Ubuntu 22.04 LTS image.
-#  ▸ Idempotent – you can re‑run it; existing artefacts are clobbered & rebuilt.
-#  ▸ Verbose, emoji‑tagged progress logs for easy visual tracking.
-# ──────────────────────────────────────────────────────────────────────────────
+###############################################################################
+# bootstrap_int64_ops.sh
+# End-to-end build & smoke-test for int64_ops pintool on Ubuntu 22.04
+###############################################################################
 set -euo pipefail
-IFS=$'\n\t'
 
-### ───────────── 1.  Cosmetic helpers ─────────────────────────────────────────
-STEP_EMOJI=('🚀' '📦' '🗜️ ' '🔧' '🏗️ ' '🛠️ ' '🧪' '✅')
-ERROR_EMOJI='❌'
-step() { echo -e "\n${STEP_EMOJI[$1]}  $2 ..."; }
-trap 'echo -e "\n${ERROR_EMOJI}  Something went wrong – aborting."; exit 1' ERR
+# ──────────────────────── config ────────────────────────
+PIN_VER="3.31"
+PIN_HOME="$HOME/pin-${PIN_VER}"
+PIN_ROOT="$PIN_HOME"
+REPO_DIR="$HOME/iccad"
+TOOL_DIR="${PIN_HOME}/source/tools/int64_ops"
+TEST_CPP="$REPO_DIR/test_installation.cpp"
+TEST_BIN="/tmp/test_installation"
 
-### ───────────── 2.  Basic variables ─────────────────────────────────────────
-REPO_URL="https://github.com/abe5240/iccad.git"
-WORKDIR="$HOME/iccad"
-PIN_ARCHIVE="intel-pin-linux.tar.gz"   # expected to be in repo root
-PIN_DIR="$HOME/pin-3.31"              # final extraction location
-INT64_DIR="$PIN_DIR/source/tools/int64_ops"
-TEST_BIN="$WORKDIR/test_installation.out"
+# ─────────────────────── logging ────────────────────────
+LOG_DIR="$HOME/logs"; mkdir -p "$LOG_DIR"
+LOG="$LOG_DIR/bootstrap_int64_ops-$(date +%F_%H-%M-%S).log"
+exec > >(tee "$LOG") 2>&1
 
-### ───────────── 3.  Tool‑chain & git ────────────────────────────────────────
-step 0 "Installing build tool‑chain (git, g++, make)"
-sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        build-essential git ca-certificates 1>/dev/null
+trap 'echo -e "\n❌  Error on line $LINENO (see $LOG)"; exit 1' ERR
 
-### ───────────── 4.  Clone (or refresh) repo ────────────────────────────────
-step 1 "Cloning/updating repository"
-if [[ -d "$WORKDIR/.git" ]]; then
-    git -C "$WORKDIR" pull --quiet
+step(){ echo -e "\n🔷 $* …"; }
+ok  (){ echo    "✔️  $*";    }
+
+# ─────────────────── 1. Tool-chain ──────────────────────
+step "Installing build tool-chain"
+sudo -n apt-get update  -qq
+sudo -n apt-get install -y --no-install-recommends build-essential git ca-certificates
+ok "Tool-chain ready"
+
+# ─────────────────── 2. Repo ─────────────────────────────
+step "Cloning / updating repo"
+if [[ -d "$REPO_DIR/.git" ]]; then
+  git -C "$REPO_DIR" pull --ff-only
 else
-    git clone --depth=1 "$REPO_URL" "$WORKDIR" --quiet
+  git clone https://github.com/abe5240/iccad.git "$REPO_DIR"
 fi
+ok "Repo ready at $REPO_DIR"
 
-### ───────────── 5.  Extract Pin ─────────────────────────────────────────────
-step 2 "Extracting Pin"
-rm -rf "$PIN_DIR"
-mkdir -p "$(dirname "$PIN_DIR")"
-tar -xf "$WORKDIR/$PIN_ARCHIVE" -C "$(dirname "$PIN_DIR")"
-# Handle unknown inner directory name → move/rename to $PIN_DIR (canonical)
-INNER_DIR="$(tar -tf "$WORKDIR/$PIN_ARCHIVE" | head -1 | cut -d/ -f1)"
-mv "$(dirname "$PIN_DIR")/$INNER_DIR" "$PIN_DIR"
+# ─────────────────── 3. Pin kit ──────────────────────────
+step "Extracting Pin $PIN_VER"
+rm -rf "$PIN_HOME"
+mkdir -p "$PIN_HOME"
+tar -xzf "$REPO_DIR/intel-pin-linux.tar.gz" -C "$PIN_HOME" --strip-components=1
+export PIN_HOME PIN_ROOT
+ok "Pin extracted to $PIN_HOME"
 
-### ───────────── 6.  Prepare int64_ops tool sources ─────────────────────────
-step 3 "Preparing int64_ops tool sources"
-rm -rf "$INT64_DIR"
-mkdir -p "$INT64_DIR"
-cp  "$WORKDIR/int64_ops.cpp"               "$INT64_DIR/"
-# Minimal makefile: piggy‑back on Pin’s build system
-cat > "$INT64_DIR/Makefile" <<'MAKEFILE'
-TOOL_ROOTS := int64_ops
-include $(PIN_HOME)/source/tools/Config/makefile.default.rules
-MAKEFILE
+# ─────────────────── 4. Prepare tool ─────────────────────
+step "Setting up int64_ops source tree"
+rm -rf "$TOOL_DIR"
+cp -r "$PIN_HOME/source/tools/MyPinTool" "$TOOL_DIR"
+rm -f  "$TOOL_DIR/MyPinTool.cpp"
+cp     "$REPO_DIR/int64_ops.cpp" "$TOOL_DIR/"
 
-### ───────────── 7.  Build int64_ops (obj‑intel64/int64_ops.so) ─────────────
-step 4 "Building int64_ops (this may take 1‑2 min)"
-export PIN_HOME="$PIN_DIR"
-make -C "$INT64_DIR"         \
-     PIN_HOME="$PIN_HOME"     \
-     obj-intel64/int64_ops.so \
-     > /dev/null
+MF="$TOOL_DIR/makefile.rules"
+sed -Ei 's/^[[:space:]]*TEST_TOOL_ROOTS[[:space:]]*:=[[:space:]].*/TEST_TOOL_ROOTS := int64_ops/' "$MF"
+sed -Ei 's/^[[:space:]]*TOOL_ROOTS[[:space:]]*:=[[:space:]].*/TOOL_ROOTS := int64_ops/'         "$MF"
+sed -i  's/\<MyPinTool\>/int64_ops/g'                                                              "$MF"
+ok "makefile.rules patched"
 
-### ───────────── 8.  Build the test workload ────────────────────────────────
-step 5 "Compiling test_installation.cpp workload"
-g++ -std=c++17 -O2 -pipe -march=native \
-    "$WORKDIR/test_installation.cpp"   \
-    -o  "$TEST_BIN"
+# ─────────────────── 5. Build pintool ────────────────────
+step "Building int64_ops.so (quiet)"
+make -s -C "$TOOL_DIR" clean
+make -s -C "$TOOL_DIR"
+ok "int64_ops.so built"
 
-### ───────────── 9.  Run smoke test via Pin ─────────────────────────────────
-step 6 "Running Pin + int64_ops on the test workload"
-PIN_CMD="$PIN_DIR/pin -t $INT64_DIR/obj-intel64/int64_ops.so -- $TEST_BIN"
-echo "🔹  Command: $PIN_CMD"
-echo    "🔹  Output:"
-$PIN_CMD | tee /tmp/int64_ops_run.log
+# ────────────────── 6. Build test app ─────────────────────
+step "Building test application (quiet)"
+g++ -O3 -std=c++17 "$TEST_CPP" -o "$TEST_BIN" 2>>"$LOG"
+ok "Test binary → $TEST_BIN"
 
-### ─────────────10.  All‑good banner ────────────────────────────────────────
-step 7 "All tasks completed successfully"
-echo -e "Log saved to /tmp/int64_ops_run.log\n"
+# ─────────────────── 7. Run Pin ───────────────────────────
+step "Running Pin with int64_ops"
+RAW=$("$PIN_HOME/pin" -t "$TOOL_DIR/obj-intel64/int64_ops.so" -- "$TEST_BIN")
+
+# ────────────────── 8. Parsed totals ─────────────────────
+echo -e "\n----- Parsed totals -----"
+echo "$RAW" | grep -E '^(ADD|SUB|MUL|DIV|SIMD)'
+
+# ─────────────────── 9. Complete ──────────────────────────
+
+echo    ""    # blank line
+ok "Bootstrap complete (logs in $LOG_DIR)"
