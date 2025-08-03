@@ -108,7 +108,7 @@ if (( VERBOSE )); then echo "$RAW"
 else                   echo "$RAW" | grep -E '^(ADD:|SUB:|MUL:|DIV:)'
 fi
 
-# ───────── 10. DRAM traffic smoke-test ─────────
+# ───────── 10. DRAM traffic smoke‑test ─────────
 step "Measuring DRAM traffic with perf"
 if perf list 2>/dev/null | grep -q 'uncore_imc/cas_count_read/'; then
     EVENTS="uncore_imc/cas_count_read/,uncore_imc/cas_count_write/"
@@ -116,10 +116,10 @@ else
     EVENTS=$(printf 'uncore_imc_%d/cas_count_read/,uncore_imc_%d/cas_count_write/,' {0..5} | sed 's/,$//')
 fi
 
-PERF=$(sudo perf stat -a --no-scale -e "$EVENTS" -- "$TEST_BIN" 2>&1 >/dev/null)
+PERF=$(sudo perf stat -x, --no-scale -a -e "$EVENTS" -- "$TEST_BIN" 2>&1 >/dev/null)
 
-READS=$(echo "$PERF" | awk '/cas_count_read/  {gsub(/[,]/,""); sum+=$1} END{print sum+0}')
-WRITES=$(echo "$PERF" | awk '/cas_count_write/ {gsub(/[,]/,""); sum+=$1} END{print sum+0}')
+READS=$(echo "$PERF" | awk -F',' '/cas_count_read/  {gsub(/[^0-9]/,"",$1); sum+=$1} END{print sum+0}')
+WRITES=$(echo "$PERF" | awk -F',' '/cas_count_write/ {gsub(/[^0-9]/,"",$1); sum+=$1} END{print sum+0}')
 BYTES=$(( 64 * (READS + WRITES) ))
 
 printf "\n--- DRAM traffic (smoke-test) ---\n"

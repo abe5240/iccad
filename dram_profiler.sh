@@ -1,31 +1,26 @@
 #!/usr/bin/env bash
 ###############################################################################
 # dram_profiler.sh – measure DRAM traffic (reads / writes) for any command
-#
-# Prerequisites (handled by installer.sh):
-#   • perf, msr, intel_uncore modules
-#
-# Usage:
-#   ./dram_profiler.sh <program> [-- <args>...]
+# Outputs results in the largest unit (B, KB, MB, GB…) with two‑decimal precision.
 ###############################################################################
 set -euo pipefail
 
-[[ $# -lt 1 ]] && { echo "Usage: $(basename "$0") cmd [-- args]"; exit 1; }
+[[ $# -lt 1 ]] && { echo "Usage: $(basename "$0") <program> [-- <args>...]"; exit 1; }
 CMD=("$@")
 
-# ───────── human-readable bytes with two decimals ─────────
-hr_bytes () {
-    local bytes=$1
-    local units=(B KB MB GB TB)
-    local exp=0
-    while (( bytes >= 1024 && exp < ${#units[@]}-1 )); do
-        bytes=$(( bytes / 1024 ))
-        ((exp++))
+# ───────── human‑readable formatter ─────────
+hr_bytes () {                          # $1 = integer byte count
+    local b=$1 u_idx=0
+    local units=(B KB MB GB TB PB)
+    while (( b >= 1024 && u_idx < ${#units[@]}-1 )); do
+        b=$(( b / 1024 ))
+        (( u_idx++ ))
     done
-    printf "%.2f %s" "$(awk "BEGIN {printf $1/(1024^$exp)}")" "${units[$exp]}"
+    awk -v bytes="$1" -v exp="$u_idx" -v u="${units[$u_idx]}" \
+        'BEGIN {printf "%.2f %s", bytes/(1024^exp), u}'
 }
 
-# ───────── choose events ─────────
+# ───────── pick correct events list ─────────
 if perf list 2>/dev/null | grep -q 'uncore_imc/cas_count_read/'; then
     EVENTS="uncore_imc/cas_count_read/,uncore_imc/cas_count_write/"
 else
@@ -34,10 +29,12 @@ fi
 
 echo "🔷 Collecting DRAM traffic via: $EVENTS"
 
-PERF=$(sudo perf stat -a --no-scale -e "$EVENTS" -- "${CMD[@]}" 2>&1 >/dev/null)
+#   -x, forces CSV output     --no-scale, raw counts
+PERF=$(sudo perf stat -x, --no-scale -a -e "$EVENTS" -- "${CMD[@]}" 2>&1 >/dev/null)
 
-READS=$(echo "$PERF" | awk '/cas_count_read/  {gsub(/[,]/,""); sum+=$1} END{print sum+0}')
-WRITES=$(echo "$PERF" | awk '/cas_count_write/ {gsub(/[,]/,""); sum+=$1} END{print sum+0}')
+# first column is the raw count; strip any non‑digit just in case
+READS=$(echo "$PERF" | awk -F',' '/cas_count_read/  {gsub(/[^0-9]/,"",$1); sum+=$1} END{print sum+0}')
+WRITES=$(echo "$PERF" | awk -F',' '/cas_count_write/ {gsub(/[^0-9]/,"",$1); sum+=$1} END{print sum+0}')
 BYTES=$(( 64 * (READS + WRITES) ))
 
 printf "\n--- DRAM traffic ---\n"
