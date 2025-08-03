@@ -1,6 +1,6 @@
-# Dev Provisioning
+# ICCAD Roofline Plot Generation
 
 Usage:
 ```
-./provision-dev-env.sh
+Copy `installation/create_int64_profiler.sh` into home directory and run.
 ```
