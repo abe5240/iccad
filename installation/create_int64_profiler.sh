@@ -35,7 +35,7 @@ exec > >(tee "$LOG") 2>&1
 trap 'echo -e "\n❌  Error on line $LINENO (see $LOG)"; exit 1' ERR
 
 step(){ echo -e "\n🔷 $* …"; }
-ok  (){ echo    "✔️  $*";    }
+ok  (){ echo    "✔️ $*";    }
 
 # ─────────── 1. tool-chain ───────────
 step "Installing build tool-chain"
