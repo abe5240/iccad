@@ -5,6 +5,13 @@
 ###############################################################################
 set -euo pipefail
 
+# ------------- optional CLI flag -----------------------------------
+VERBOSE=0
+if [[ "${1:-}" == "--verbose" ]]; then
+    VERBOSE=1
+    shift
+fi
+
 # ─────────── config ───────────
 PIN_VER="3.31"
 PIN_HOME="$HOME/pin-${PIN_VER}"
@@ -87,12 +94,20 @@ ok "Test binary → $TEST_BIN"
 
 # ─────────── 8. run Pin ───────────
 step "Running Pin with ${TOOL_NAME}"
-RAW=$("$PIN_HOME/pin" -t "$TOOL_DIR/obj-intel64/${TOOL_NAME}.so" -- "$TEST_BIN")
+PIN_ARGS=()
+[[ $VERBOSE -eq 1 ]] && PIN_ARGS+=("-verbose" "1")
+
+RAW=$("$PIN_HOME/pin" -t "$TOOL_DIR/obj-intel64/${TOOL_NAME}.so" \
+      "${PIN_ARGS[@]}" -- "$TEST_BIN")
 
 # ─────────── 9. parsed totals ───────────
 echo -e "\n----- Parsed totals -----"
-echo "$RAW" | grep -E '^(ADD|SUB|ADC|SBB|MULX?|ADCX|ADOX|DIV|SIMD|IMMEDIATE)'
+if [[ $VERBOSE -eq 1 ]]; then
+    echo "$RAW"
+else
+    echo "$RAW" | grep -E '^(ADD:|SUB:|MUL:|DIV:)'
+fi
 
 # ─────────── finished ───────────
 echo
-ok "Bootstrap complete (logs in $LOG_DIR)"
+ok "Installation complete (logs in $LOG_DIR)"

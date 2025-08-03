@@ -16,10 +16,15 @@
 #include <algorithm>
 #include <vector>
 
-// ----------------- user‑tunable filters ----------------------------
-static constexpr bool kExcludeImms   = true;   // for main counts
+// -------------------- command‑line knob ----------------------------
+KNOB<BOOL> knobVerbose(KNOB_MODE_WRITEONCE, "pintool",
+                      "verbose", "0",
+                      "Print full per‑opcode breakdown");
+
+// ----------------- compile‑time filters ----------------------------
+static constexpr bool kExcludeImms   = true;
 static constexpr bool kExcludeStack  = true;
-static constexpr bool kCountMemRmw   = true;   // reg→mem RMW counted
+static constexpr bool kCountMemRmw   = true;
 
 // ------------------ per‑thread counters (aligned) ------------------
 struct alignas(64) Cnts {
@@ -281,33 +286,57 @@ static VOID Instruction(INS ins, VOID*)
 static VOID Fini(INT32, VOID*)
 {
     Cnts tot{};
-    for(auto* c : g_all){
+    for (auto* c : g_all) {
         #define ADD(field) tot.field += c->field
-        ADD(add_rr); ADD(sub_rr); ADD(adc_rr); ADD(sbb_rr);
-        ADD(mul_rr); ADD(mulx_rr); ADD(adcx_rr); ADD(adox_rr); ADD(div_rr);
-        ADD(add_rm); ADD(sub_rm); ADD(adc_rm); ADD(sbb_rm);
-        ADD(mul_rm); ADD(mulx_rm); ADD(adcx_rm); ADD(adox_rm); ADD(div_rm);
+        ADD(add_rr);  ADD(sub_rr);  ADD(adc_rr);  ADD(sbb_rr);
+        ADD(mul_rr);  ADD(mulx_rr); ADD(adcx_rr); ADD(adox_rr); ADD(div_rr);
+        ADD(add_rm);  ADD(sub_rm);  ADD(adc_rm);  ADD(sbb_rm);
+        ADD(mul_rm);  ADD(mulx_rm); ADD(adcx_rm); ADD(adox_rm); ADD(div_rm);
         ADD(simd_addq_insn); ADD(simd_addq_ops);
         ADD(simd_subq_insn); ADD(simd_subq_ops);
         ADD(imm_ops);
         delete c;
     }
 
-    std::cout << "--- 64‑bit integer arithmetic (no imm, no stack) ---\n"
-              << "ADD   rr: " << tot.add_rr  << "   rm/mr: " << tot.add_rm  << '\n'
-              << "SUB   rr: " << tot.sub_rr  << "   rm/mr: " << tot.sub_rm  << '\n'
-              << "ADC   rr: " << tot.adc_rr  << "   rm/mr: " << tot.adc_rm  << '\n'
-              << "SBB   rr: " << tot.sbb_rr  << "   rm/mr: " << tot.sbb_rm  << '\n'
-              << "MUL   rr: " << tot.mul_rr  << "   rm/mr: " << tot.mul_rm  << '\n'
-              << "MULX  rr: " << tot.mulx_rr << "   rm/mr: " << tot.mulx_rm << '\n'
-              << "ADCX  rr: " << tot.adcx_rr << "   rm/mr: " << tot.adcx_rm << '\n'
-              << "ADOX  rr: " << tot.adox_rr << "   rm/mr: " << tot.adox_rm << '\n'
-              << "DIV   rr: " << tot.div_rr  << "   rm/mr: " << tot.div_rm  << '\n'
-              << "SIMD ADDQ: " << tot.simd_addq_insn << " insns, "
-              << tot.simd_addq_ops << " lane‑ops\n"
-              << "SIMD SUBQ: " << tot.simd_subq_insn << " insns, "
-              << tot.simd_subq_ops << " lane‑ops\n"
-              << "IMMEDIATE sanity (all opcodes): " << tot.imm_ops << " insns\n";
+    if (knobVerbose.Value()) {
+        // ───── full per‑opcode dump ────────────────────────────────
+        std::cout << "--- 64‑bit integer arithmetic (no imm, no stack) ---\n"
+                  << "ADD   rr: " << tot.add_rr  << "   rm/mr: " << tot.add_rm  << '\n'
+                  << "SUB   rr: " << tot.sub_rr  << "   rm/mr: " << tot.sub_rm  << '\n'
+                  << "ADC   rr: " << tot.adc_rr  << "   rm/mr: " << tot.adc_rm  << '\n'
+                  << "SBB   rr: " << tot.sbb_rr  << "   rm/mr: " << tot.sbb_rm  << '\n'
+                  << "MUL   rr: " << tot.mul_rr  << "   rm/mr: " << tot.mul_rm  << '\n'
+                  << "MULX  rr: " << tot.mulx_rr << "   rm/mr: " << tot.mulx_rm << '\n'
+                  << "ADCX  rr: " << tot.adcx_rr << "   rm/mr: " << tot.adcx_rm << '\n'
+                  << "ADOX  rr: " << tot.adox_rr << "   rm/mr: " << tot.adox_rm << '\n'
+                  << "DIV   rr: " << tot.div_rr  << "   rm/mr: " << tot.div_rm  << '\n'
+                  << "SIMD ADDQ: " << tot.simd_addq_insn << " insns, "
+                  << tot.simd_addq_ops << " lane‑ops\n"
+                  << "SIMD SUBQ: " << tot.simd_subq_insn << " insns, "
+                  << tot.simd_subq_ops << " lane‑ops\n"
+                  << "IMMEDIATE (loops, stack ptr, etc.): "
+                  << tot.imm_ops << " insns\n";
+    } else {
+        // ───── compact default output ─────────────────────────────
+        auto ADD = tot.add_rr + tot.add_rm +
+                   tot.adc_rr + tot.adc_rm +
+                   tot.adcx_rr + tot.adcx_rm +
+                   tot.adox_rr + tot.adox_rm;
+
+        auto SUB = tot.sub_rr + tot.sub_rm +
+                   tot.sbb_rr + tot.sbb_rm;
+
+        auto MUL = tot.mul_rr + tot.mul_rm +
+                   tot.mulx_rr + tot.mulx_rm;
+
+        auto DIV = tot.div_rr + tot.div_rm;
+
+        std::cout << "--- 64‑bit integer arithmetic (filtered) ---\n"
+                  << "ADD: " << ADD << '\n'
+                  << "SUB: " << SUB << '\n'
+                  << "MUL: " << MUL << '\n'
+                  << "DIV: " << DIV << '\n';
+    }
 }
 
 // ------------------------------ entry -------------------------------
