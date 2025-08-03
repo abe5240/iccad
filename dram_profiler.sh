@@ -30,7 +30,8 @@ fi
 echo "🔷 Collecting DRAM traffic via: $EVENTS"
 
 #   -x, forces CSV output     --no-scale, raw counts
-PERF=$(sudo perf stat -x, --no-scale -a -e "$EVENTS" -- "${CMD[@]}" 2>&1 >/dev/null)
+PERF=$(sudo perf stat -x, --no-scale -a -e "$EVENTS" -- "${CMD[@]}" \
+       2>&1 | tee /dev/tty)
 
 # first column is the raw count; strip any non‑digit just in case
 READS=$(echo "$PERF" | awk -F',' '/cas_count_read/  {gsub(/[^0-9]/,"",$1); sum+=$1} END{print sum+0}')

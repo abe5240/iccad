@@ -38,8 +38,10 @@ TARGET="$1"; shift
 PIN_ARGS=()
 (( VERBOSE )) && PIN_ARGS+=("-verbose" "1")
 
-RAW=$("$PIN_HOME/pin" -t "$TOOL_SO" "${PIN_ARGS[@]}" \
-      -- "$TARGET" "$@" 2>/dev/null)
+RAW=$(
+  { "$PIN_HOME/pin" -t "$TOOL_SO" "${PIN_ARGS[@]}" -- "$TARGET" "$@" 2>/dev/null; } \
+  | tee /dev/tty
+)
 
 # ───────── print result ─────────
 if (( VERBOSE )); then

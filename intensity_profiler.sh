@@ -42,7 +42,8 @@ hr_bytes () {
 
 # ───────── step 1 – integer operations ─────────
 PIN_ARGS=(); (( VERBOSE )) && PIN_ARGS+=("-verbose" "1")
-RAW=$("$PIN_HOME/pin" -t "$TOOL_SO" "${PIN_ARGS[@]}" -- "$TARGET" "$@" 2>/dev/null)
+RAW=$( { "$PIN_HOME/pin" -t "$TOOL_SO" "${PIN_ARGS[@]}" -- "$TARGET" "$@" ; } \
+       2>&1 | tee /dev/tty )
 
 if (( VERBOSE )); then echo "$RAW"; fi
 
