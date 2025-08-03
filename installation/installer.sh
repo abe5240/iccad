@@ -106,4 +106,4 @@ else
 fi
 
 echo
-ok "Bootstrap complete (full log: $LOG)"
+ok "Installation complete (full log: $LOG)"
