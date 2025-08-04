@@ -91,7 +91,7 @@ TOTAL_BYTES=$(( READ_BYTES + WRITE_BYTES ))
 if (( TOTAL_BYTES == 0 )); then
   INTENSITY="n/a"
 else
-  INTENSITY=$(awk -v o="$INT_OPS" -v b="$TOTAL_BYTES" 'BEGIN{printf "%.3f",o/b}')
+  INTENSITY=$(awk -v o="$INT_OPS" -v b="$TOTAL_BYTES" 'BEGIN{printf "%.6f",o/b}')
 fi
 
 ###############################################################################
