@@ -112,7 +112,7 @@ ok "Pintool built → $TOOL_DIR/obj-intel64/${TOOL_NAME}.so"
 # 7. build test binary with toBenchmark() (non‑PIE, exported symbol)
 ###############################################################################
 step "Building test binary"
-g++ -std=c++17 -O0 -g -no-pie -fno-pie -rdynamic \
+g++ -std=c++17 -no-pie -fno-pie \
     "$TEST_CPP" -o "$TEST_BIN"
 ok "Test binary → $TEST_BIN"
 
