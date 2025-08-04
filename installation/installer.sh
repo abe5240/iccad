@@ -131,7 +131,6 @@ echo
 ok "Smoke‑test finished"
 echo "Expected (≈):  ~4 000 integer-ops   |   ~3 GB DRAM traffic"
 echo "If you’re within a few percent of those, the counters are fine."
-echo
 
 echo -e "\n🎉  Installation complete (details in $LOG)"
 echo "   You can now run ${PROF##*/} on any binary:"
