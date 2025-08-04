@@ -1,38 +1,86 @@
 #!/usr/bin/env bash
 ###############################################################################
-# dram_profiler.sh  –  measure DRAM read / write traffic for any command
-#   • Intel server CPUs (Skylake → Sapphire-Rapids) with iMC CAS_COUNT events
-#   • Counts 64-B cache-line transfers; prints human-readable bytes
-#   • Requires root or perf_event_paranoid ≤ 0
+# dram_profiler.sh
+#
+# Measure DRAM traffic (reads / writes) for any command on Intel server CPUs.
+#
+#  • Counts iMC CAS-COUNT lines (64-byte cache-line transfers).
+#  • Handles both reads and writes; totals are reported in bytes.
+#  • Prints a human-friendly summary as well as raw line counts.
+#
+# REQUIREMENTS
+#  • Run as root   ──OR──   set /proc/sys/kernel/perf_event_paranoid ≤ 0
+#  • intel_uncore driver loaded (visible via `perf list`).
+#
+# EXAMPLE
+#   sudo ./dram_profiler.sh ./my_program --arg1 foo
+#
 ###############################################################################
 set -euo pipefail
 
-[[ $# -lt 1 ]] && { echo "Usage: $(basename "$0") <cmd> [args]" >&2; exit 1; }
+#######################################
+# Helper: print human-readable byte sizes
+# Globals:  none
+# Arguments:
+#   $1 – integer #bytes
+#######################################
+hr_bytes() {
+    local b=$1 units=(B KB MB GB TB PB) idx=0
+    while (( b >= 1024 && idx < ${#units[@]}-1 )); do
+        b=$(( b / 1024 ))
+        (( idx++ ))
+    done
+    # original bytes still in $1
+    awk -vB="$1" -vE="$idx" -vU="${units[$idx]}" \
+        'BEGIN{printf("%.2f %s",B/(1024^E),U)}'
+}
+
+#######################################
+# Abort if no command supplied
+#######################################
+[[ $# -lt 1 ]] && {
+    echo "Usage: $(basename "$0") <command> [-- <args>...]" >&2
+    exit 1
+}
 CMD=( "$@" )
 
-# ─────────── byte formatter ─────────────────────────────────────────
-hr() { local b=$1 u=(B KB MB GB TB PB) i=0
-       while (( b>=1024 && i<${#u[@]}-1 )); do b=$((b/1024)); ((i++)); done
-       awk -vB="$1" -vE="$i" -vU="${u[$i]}" 'BEGIN{printf "%.2f %s",B/(1024^E),U}'; }
+#######################################
+# Verify CAS-COUNT alias events exist
+#######################################
+ALIAS_RD='uncore_imc/cas_count_read/'
+ALIAS_WR='uncore_imc/cas_count_write/'
 
-# ─────────── confirm alias events exist ────────────────────────────
-if ! perf list | grep -q 'uncore_imc/cas_count_read/'; then
-    echo "❌  iMC CAS_COUNT alias not found (intel_uncore not loaded?)" >&2
+if ! sudo perf list 2>/dev/null | grep -q "$ALIAS_RD"; then
+    cat >&2 <<EOF
+❌  iMC CAS-COUNT alias events not available.
+    • Is the intel_uncore driver loaded?
+    • Are you running with sufficient privilege?
+      (run script via sudo or set perf_event_paranoid to 0)
+EOF
     exit 1
 fi
-EVENTS="uncore_imc/cas_count_read/,uncore_imc/cas_count_write/"
-echo "🔷 Collecting via: $EVENTS"
+EVENTS="${ALIAS_RD},${ALIAS_WR}"
+echo "🔷 Measuring via events: $EVENTS"
 
-# ─────────── run perf & capture CSV output ─────────────────────────
-CSV=$(sudo perf stat -x, --no-scale -a -e "$EVENTS" -- "${CMD[@]}" 2>&1 | tee /dev/tty)
+#######################################
+# Run perf stat (CSV mode) and capture output
+#######################################
+PERF_CSV=$(sudo perf stat -x, --no-scale -a -e "$EVENTS" -- "${CMD[@]}" \
+           2>&1 | tee /dev/tty)
 
-# ─────────── parse counts ──────────────────────────────────────────
-reads=$( echo "$CSV" | awk -F',' '/cas_count_read/  {gsub(/[^0-9]/,"",$1);r+=$1} END{print r+0}')
-writes=$(echo "$CSV" | awk -F',' '/cas_count_write/ {gsub(/[^0-9]/,"",$1);w+=$1} END{print w+0}')
-bytes=$(( 64 * (reads + writes) ))
+#######################################
+# Parse raw line counts from CSV
+#######################################
+reads=$( echo "$PERF_CSV"  \
+         | awk -F',' '/cas_count_read/  {gsub(/[^0-9]/,"",$1);r+=$1} END{print r+0}')
+writes=$(echo "$PERF_CSV"  \
+         | awk -F',' '/cas_count_write/ {gsub(/[^0-9]/,"",$1);w+=$1} END{print w+0}')
+total_bytes=$(( 64 * (reads + writes) ))
 
-# ─────────── summary ───────────────────────────────────────────────
-printf "\n--- DRAM traffic (64-B lines) ---\n"
-printf "Reads : %'d  (%s)\n"  "$reads"  "$(hr $((64*reads)))"
-printf "Writes: %'d  (%s)\n"  "$writes" "$(hr $((64*writes)))"
-printf "Total : %s\n"         "$(hr $bytes)"
+#######################################
+# Report
+#######################################
+printf "\n--- DRAM traffic (64-byte cache-lines) ---\n"
+printf "Reads : %'15d lines  (%s)\n" "$reads"  "$(hr_bytes $((64*reads)))"
+printf "Writes: %'15d lines  (%s)\n" "$writes" "$(hr_bytes $((64*writes)))"
+printf "Total : %s\n"                 "$(hr_bytes $total_bytes)"
