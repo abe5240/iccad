@@ -69,7 +69,7 @@ DRAM_RAW=$("$DRAM_SH" "$TARGET" "${EXTRA_ARGS[@]}")
 READ_LINES=0
 WRITE_LINES=0
 
-# parse “Reads :    123 lines (…”
+# parse “Reads : 123 lines (…”
 while read -r line; do
     case "$line" in
         *Reads*)  READ_LINES=$(grep -oE '[0-9,]+' <<<"$line" | head -1 | tr -d ,);;

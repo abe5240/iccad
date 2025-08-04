@@ -36,7 +36,7 @@ LOG="$LOG_DIR/bootstrap_${TOOL_NAME,,}-$(date +%F_%H-%M-%S).log"
 exec > >(tee "$LOG") 2>&1
 trap 'echo -e "\n❌  Error on line $LINENO (see $LOG)"; exit 1' ERR
 step(){ echo -e "\n🔷 $* …"; }
-ok(){   echo    "✔️  $*";   }
+ok(){   echo    "✔️ $*";   }
 
 ###############################################################################
 # 1. packages
@@ -105,7 +105,7 @@ ok "Tool source prepared"
 ###############################################################################
 step "Compiling $TOOL_NAME"
 make -s -C "$TOOL_DIR" clean
-make -s -C "$TOOL_DIR"
+make -s -C "$TOOL_DIR" EXTRA_LDFLAGS=-Wl,-w
 ok "Pintool built → $TOOL_DIR/obj-intel64/${TOOL_NAME}.so"
 
 ###############################################################################
@@ -122,7 +122,6 @@ ok "Test binary → $TEST_BIN"
 PROF="$REPO_DIR/intensity_profiler.sh"
 [[ -x "$PROF" ]] || { echo "❌ $PROF not found or not executable"; exit 1; }
 
-echo
 step "Running integer‑intensity smoke‑test"
 ARGS=("$TEST_BIN" "toBenchmark")
 (( VERBOSE )) && ARGS+=(--verbose)
@@ -134,3 +133,4 @@ ok "Smoke‑test finished"
 echo -e "\n🎉  Installation complete (details in $LOG)"
 echo "   You can now run ${PROF##*/} on any binary:"
 echo "     $ $PROF <my_prog> [function] [--verbose]"
+echo
