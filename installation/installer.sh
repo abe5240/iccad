@@ -44,6 +44,27 @@ hr_bytes () {                    # $1 = integer bytes
     printf "%s %s" "$value" "${units[$exp]}"
 }
 
+# ───────── helper: parse perf value with unit ─────────
+parse_perf_value() {
+    local line=$1
+    local value=$(echo "$line" | cut -d',' -f1)
+    local unit=$(echo "$line" | cut -d',' -f2)
+    
+    # Convert decimal value to integer for bash arithmetic
+    local int_val=$(echo "$value" | awk '{printf "%.0f", $1}')
+    
+    # Convert to bytes based on unit
+    case "$unit" in
+        "MiB") echo $(( int_val * 1048576 )) ;;
+        "GiB") echo $(( int_val * 1073741824 )) ;;
+        "KiB") echo $(( int_val * 1024 )) ;;
+        "B"|"") echo "$int_val" ;;
+        *) 
+            # No unit or unknown unit - assume raw cache line count
+            echo $(( int_val * 64 )) ;;
+    esac
+}
+
 # ───────── 1. packages ─────────
 step "Installing compiler, Pin prerequisites, and perf tools"
 sudo apt-get update -qq
@@ -108,7 +129,7 @@ if (( VERBOSE )); then echo "$RAW"
 else                   echo "$RAW" | grep -E '^(ADD:|SUB:|MUL:|DIV:)'
 fi
 
-# ───────── 10. DRAM traffic smoke‑test ─────────
+# ───────── 10. DRAM traffic smoke‑test (FIXED) ─────────
 step "Measuring DRAM traffic with perf"
 if perf list 2>/dev/null | grep -q 'uncore_imc/cas_count_read/'; then
     EVENTS="uncore_imc/cas_count_read/,uncore_imc/cas_count_write/"
@@ -118,13 +139,34 @@ fi
 
 PERF=$(sudo perf stat -x, --no-scale -a -e "$EVENTS" -- "$TEST_BIN" 2>&1 >/dev/null)
 
-READS=$(echo "$PERF" | awk -F',' '/cas_count_read/  {gsub(/[^0-9]/,"",$1); sum+=$1} END{print sum+0}')
-WRITES=$(echo "$PERF" | awk -F',' '/cas_count_write/ {gsub(/[^0-9]/,"",$1); sum+=$1} END{print sum+0}')
-BYTES=$(( 64 * (READS + WRITES) ))
+# Parse DRAM traffic with proper unit handling
+READ_BYTES=0
+WRITE_BYTES=0
+
+# Process all read events
+while IFS= read -r line; do
+    if [[ -n "$line" ]]; then
+        bytes=$(parse_perf_value "$line")
+        READ_BYTES=$(( READ_BYTES + bytes ))
+    fi
+done < <(echo "$PERF" | grep -i "cas_count_read")
+
+# Process all write events
+while IFS= read -r line; do
+    if [[ -n "$line" ]]; then
+        bytes=$(parse_perf_value "$line")
+        WRITE_BYTES=$(( WRITE_BYTES + bytes ))
+    fi
+done < <(echo "$PERF" | grep -i "cas_count_write")
+
+# Total bytes and cache lines
+BYTES=$(( READ_BYTES + WRITE_BYTES ))
+READS=$(( READ_BYTES / 64 ))
+WRITES=$(( WRITE_BYTES / 64 ))
 
 printf "\n--- DRAM traffic (smoke-test) ---\n"
-printf "Reads : %'d lines (%s)\n"  "$READS"  "$(hr_bytes $((64*READS)))"
-printf "Writes: %'d lines (%s)\n"  "$WRITES" "$(hr_bytes $((64*WRITES)))"
+printf "Reads : %'d lines (%s)\n"  "$READS"  "$(hr_bytes $READ_BYTES)"
+printf "Writes: %'d lines (%s)\n"  "$WRITES" "$(hr_bytes $WRITE_BYTES)"
 printf "Total : %s\n"              "$(hr_bytes $BYTES)"
 
 # ───────── 11. Arithmetic‑intensity smoke‑test ─────────
