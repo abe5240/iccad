@@ -3,6 +3,11 @@
 # installer.sh
 # Build Int64Profiler, smoke-test it, and verify DRAM counters.
 # Default = compact pintool output; add --verbose for full opcode dump.
+# 
+# This installer permanently configures:
+#   • kernel.perf_event_paranoid = -1 (allows non-root perf access)
+#   • Auto-loads intel_uncore module on boot
+# After installation, users can run profiler scripts WITHOUT sudo
 ###############################################################################
 set -euo pipefail
 
@@ -78,9 +83,20 @@ ok "Packages ready"
 step "Loading msr & intel_uncore modules"
 sudo modprobe msr
 sudo modprobe intel_uncore || true
-step "Setting /proc/sys/kernel/perf_event_paranoid → -1"
-echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid >/dev/null
-ok "Uncore counters accessible"
+
+step "Setting perf_event_paranoid → -1 (permanent)"
+echo "# Allow unprivileged access to performance counters" | sudo tee /etc/sysctl.d/99-perf.conf >/dev/null
+echo "kernel.perf_event_paranoid = -1" | sudo tee -a /etc/sysctl.d/99-perf.conf >/dev/null
+sudo sysctl -p /etc/sysctl.d/99-perf.conf
+
+step "Configuring module auto-loading on boot"
+echo "# Auto-load Intel uncore performance monitoring" | sudo tee /etc/modules-load.d/intel-uncore.conf >/dev/null
+echo "msr" | sudo tee -a /etc/modules-load.d/intel-uncore.conf >/dev/null
+echo "intel_uncore" | sudo tee -a /etc/modules-load.d/intel-uncore.conf >/dev/null
+
+ok "Uncore counters accessible (permanent configuration applied)"
+echo "   ℹ️  Performance counters will remain accessible after reboot"
+echo "   ℹ️  Users can now run perf without sudo"
 
 # ───────── 3. clone / update repo ─────────
 step "Cloning / updating iccad repo"
@@ -188,3 +204,9 @@ printf "Intensity   : %s ops/byte\n" "$AI"
 
 echo
 ok "Installation complete (log: $LOG)"
+echo
+echo "🔸 IMPORTANT: Performance counter access has been configured:"
+echo "   • perf_event_paranoid set to -1 (permanent)"
+echo "   • intel_uncore module set to auto-load on boot"
+echo "   • You can now run perf and the profiler scripts WITHOUT sudo"
+echo "   • These settings will persist across reboots"
