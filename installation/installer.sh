@@ -145,7 +145,7 @@ if (( VERBOSE )); then echo "$RAW"
 else                   echo "$RAW" | grep -E '^(ADD:|SUB:|MUL:|DIV:)'
 fi
 
-# ───────── 10. DRAM traffic smoke‑test (FIXED) ─────────
+# ───────── 10. DRAM traffic smoke‑test  ─────────
 step "Measuring DRAM traffic with perf"
 if perf list 2>/dev/null | grep -q 'uncore_imc/cas_count_read/'; then
     EVENTS="uncore_imc/cas_count_read/,uncore_imc/cas_count_write/"

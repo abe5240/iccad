@@ -1,57 +1,51 @@
-// int64_ops.cpp – Pin 3.31
-// Count 64‑bit scalar integer arithmetic in “real work”
-// -----------------------------------------------------
+// int64_ops.cpp – Pin 3.31 (region-gated version)
 //
-//  * Main counts:  reg‑reg  and reg↔mem ADD/ADC/SUB/SBB/MUL/IMUL/
-//                  MULX/ADOX/ADCX/DIV/IDIV (no immediates, no stack).
-//  * SIMD sanity:  packed‑QWORD ADD/SUB lane‑ops.
-//  * Imm sanity:   same opcode set, but at least one immediate operand.
+// Counts 64-bit scalar integer arithmetic only while the user-defined
+// routine `toBenchmark()` is active.
 //
-// Compile inside the Int64Profiler pintool tree:
-//   make -C $PIN_HOME/source/tools/Int64Profiler
-//
-// ────────────────────────────────────────────────────────────────────
+// Build:  make -C $PIN_HOME/source/tools/Int64Profiler
+//--------------------------------------------------------------------
 #include "pin.H"
 #include <iostream>
-#include <algorithm>
 #include <vector>
+#include <algorithm>
 
-// -------------------- command‑line knob ----------------------------
-KNOB<BOOL> knobVerbose(KNOB_MODE_WRITEONCE, "pintool",
-                      "verbose", "0",
-                      "Print full per‑opcode breakdown");
+// -------------------- command-line knob ----------------------------
+KNOB<string> knobFunc(KNOB_MODE_WRITEONCE, "pintool",
+                     "func", "toBenchmark",
+                     "Name of function whose body should be counted");
+KNOB<BOOL>   knobVerbose(KNOB_MODE_WRITEONCE, "pintool",
+                     "verbose", "0",
+                     "Print full per-opcode breakdown");
 
-// ----------------- compile‑time filters ----------------------------
+// ----------------- compile-time filters ----------------------------
 static constexpr bool kExcludeImms   = true;
 static constexpr bool kExcludeStack  = true;
 static constexpr bool kCountMemRmw   = true;
 
-// ------------------ per‑thread counters (aligned) ------------------
+// ------------------ per-thread counters (aligned) ------------------
 struct alignas(64) Cnts {
-    // main arithmetic
     UINT64 add_rr{},  sub_rr{},  adc_rr{},  sbb_rr{};
     UINT64 mul_rr{},  mulx_rr{}, adcx_rr{}, adox_rr{}, div_rr{};
     UINT64 add_rm{},  sub_rm{},  adc_rm{},  sbb_rm{};
     UINT64 mul_rm{},  mulx_rm{}, adcx_rm{}, adox_rm{}, div_rm{};
-
-    // SIMD sanity
     UINT64 simd_addq_insn{}, simd_addq_ops{};
     UINT64 simd_subq_insn{}, simd_subq_ops{};
-
-    // immediate sanity
     UINT64 imm_ops{};
 };
-
-// ------------------- global bookkeeping ---------------------------
-static TLS_KEY            g_tls;
+// bookkeeping
+static TLS_KEY            g_tls_cnts;
+static TLS_KEY            g_tls_flag;          // bool: counting ?
 static std::vector<Cnts*> g_all;
 static PIN_LOCK           g_lock;
 
-// ----------------------- TLS accessor ----------------------------
 static inline Cnts* C(THREADID t)
-{ return static_cast<Cnts*>(PIN_GetThreadData(g_tls, t)); }
+{ return static_cast<Cnts*>(PIN_GetThreadData(g_tls_cnts, t)); }
 
-// -------------------- fast increment helpers ----------------------
+static inline bool Counting(THREADID t)
+{ return PIN_GetThreadData(g_tls_flag, t) != nullptr; }
+
+// ------------------ fast increment helpers ------------------------
 #define FAST PIN_FAST_ANALYSIS_CALL
 #define DEF_FAST(fn) static VOID FAST fn(THREADID t){ C(t)->fn++; }
 
@@ -74,14 +68,12 @@ static VOID FAST SimdAddQMasked (THREADID t, UINT32 n, ADDRINT m)
                    static_cast<UINT64>(m) & ((1ULL<<n)-1));
     auto* c=C(t); c->simd_addq_insn++; c->simd_addq_ops+=a;
 }
-
 static VOID FAST SimdSubQMasked (THREADID t, UINT32 n, ADDRINT m)
 {
     UINT32 a = __builtin_popcountll(
                    static_cast<UINT64>(m) & ((1ULL<<n)-1));
     auto* c=C(t); c->simd_subq_insn++; c->simd_subq_ops+=a;
 }
-
 static VOID FAST ImmOp(THREADID t)
 { C(t)->imm_ops++; }
 
@@ -94,7 +86,6 @@ static inline BOOL HasImm(INS ins){
         if(INS_OperandIsImmediate(ins,i)) return TRUE;
     return FALSE;
 }
-
 static inline BOOL TouchesStack(INS ins){
     if(!kExcludeStack) return FALSE;
     for(UINT32 i=0;i<INS_MaxNumRRegs(ins);++i)
@@ -103,35 +94,30 @@ static inline BOOL TouchesStack(INS ins){
         if(IsStackRg(INS_RegW(ins,i))) return TRUE;
     return INS_IsStackRead(ins) || INS_IsStackWrite(ins);
 }
-
 static inline BOOL Has64RegR(INS ins){
     for(UINT32 i=0;i<INS_MaxNumRRegs(ins);++i)
         if(Is64Gpr(INS_RegR(ins,i)) && !IsStackRg(INS_RegR(ins,i)))
             return TRUE;
     return FALSE;
 }
-
 static inline BOOL Has64RegW(INS ins){
     for(UINT32 i=0;i<INS_MaxNumWRegs(ins);++i)
         if(Is64Gpr(INS_RegW(ins,i)) && !IsStackRg(INS_RegW(ins,i)))
             return TRUE;
     return FALSE;
 }
-
 static inline BOOL MemRead8 (INS ins){
     for(UINT32 i=0;i<INS_MemoryOperandCount(ins);++i)
         if(INS_MemoryOperandIsRead(ins,i) &&
            INS_MemoryOperandSize(ins,i)==8) return TRUE;
     return FALSE;
 }
-
 static inline BOOL MemWrite8(INS ins){
     for(UINT32 i=0;i<INS_MemoryOperandCount(ins);++i)
         if(INS_MemoryOperandIsWritten(ins,i) &&
            INS_MemoryOperandSize(ins,i)==8) return TRUE;
     return FALSE;
 }
-
 static inline UINT32 QwordLanes(INS ins){
     UINT32 bytes = 0;
     for(UINT32 i=0;i<INS_MaxNumWRegs(ins);++i){
@@ -140,9 +126,8 @@ static inline UINT32 QwordLanes(INS ins){
            REG_is_ymm(r) || REG_is_zmm(r))
             bytes = std::max<UINT32>(bytes, REG_Size(r));
     }
-    return bytes ? bytes/8 : 2;   // default XMM → 2 lanes
+    return bytes ? bytes/8 : 2;
 }
-
 static inline REG MaskReg(INS ins){
     for(UINT32 i=0;i<INS_MaxNumRRegs(ins);++i){
         REG r = INS_RegR(ins,i);
@@ -151,35 +136,25 @@ static inline REG MaskReg(INS ins){
     return REG_INVALID_;
 }
 
-// ----------------- opcode classifier --------------------------------
+// ----------------- opcode classifier ------------------------------
 static inline BOOL Is64ALU(xed_iclass_enum_t o)
 {
     switch(o){
-        /* add / sub and carry variants */
-        case XED_ICLASS_ADD:   case XED_ICLASS_SUB:
-        case XED_ICLASS_ADC:   case XED_ICLASS_SBB:
-
-        /* multiply & helpers */
-        case XED_ICLASS_IMUL:  case XED_ICLASS_MUL:
+        case XED_ICLASS_ADD: case XED_ICLASS_SUB:
+        case XED_ICLASS_ADC: case XED_ICLASS_SBB:
+        case XED_ICLASS_IMUL: case XED_ICLASS_MUL:
         case XED_ICLASS_MULX:
-        case XED_ICLASS_ADCX:  case XED_ICLASS_ADOX:
-
-        /* divide */
-        case XED_ICLASS_IDIV:  case XED_ICLASS_DIV:
+        case XED_ICLASS_ADCX: case XED_ICLASS_ADOX:
+        case XED_ICLASS_IDIV: case XED_ICLASS_DIV:
             return TRUE;
-
-        default:
-            return FALSE;
+        default: return FALSE;
     }
 }
-
-// ----------------- reg/mem classifiers ------------------------------
 static inline BOOL IsRegReg64(INS ins){
     return INS_MemoryOperandCount(ins)==0 &&
            !HasImm(ins) && !TouchesStack(ins) &&
            Has64RegR(ins) && Has64RegW(ins);
 }
-
 static inline BOOL IsRegMem64(INS ins){
     if(HasImm(ins) || TouchesStack(ins)) return FALSE;
     BOOL mr  = MemRead8(ins)  && Has64RegW(ins) && !MemWrite8(ins);
@@ -187,67 +162,75 @@ static inline BOOL IsRegMem64(INS ins){
     return mr || rmw;
 }
 
-// ---------------- thread lifecycle ----------------------------------
+// ---------------- thread lifecycle --------------------------------
 static VOID ThreadStart(THREADID tid, CONTEXT*, INT32, VOID*)
 {
     auto* c = new Cnts;
-    PIN_SetThreadData(g_tls, c, tid);
+    PIN_SetThreadData(g_tls_cnts, c, tid);
+    PIN_SetThreadData(g_tls_flag, nullptr, tid);
 
     PIN_GetLock(&g_lock, tid+1);
     g_all.push_back(c);
     PIN_ReleaseLock(&g_lock);
 }
 
-// ------------------------ instrumentation ---------------------------
+// ---------------- function-entry toggles --------------------------
+static VOID Enter(THREADID t) { PIN_SetThreadData(g_tls_flag,(VOID*)1,t); }
+static VOID Leave(THREADID t) { PIN_SetThreadData(g_tls_flag,nullptr,t); }
+
+static VOID ImageLoad(IMG img, VOID*)
+{
+    RTN rtn = RTN_FindByName(img, knobFunc.Value().c_str());
+    if(!RTN_Valid(rtn)) return;
+
+    RTN_Open(rtn);
+    RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)Enter,
+                   IARG_THREAD_ID, IARG_END);
+    RTN_InsertCall(rtn, IPOINT_AFTER,  (AFUNPTR)Leave,
+                   IARG_THREAD_ID, IARG_END);
+    RTN_Close(rtn);
+}
+
+// ---------------------- instrumentation ---------------------------
 static VOID Instruction(INS ins, VOID*)
 {
+    if(!Counting(PIN_ThreadId())) return;
+
     const auto opc = static_cast<xed_iclass_enum_t>(INS_Opcode(ins));
 
-    /* SIMD sanity --------------------------------------------------- */
+    /* SIMD sanity */
     if(opc==XED_ICLASS_PADDQ || opc==XED_ICLASS_VPADDQ ||
-       opc==XED_ICLASS_PSUBQ || opc==XED_ICLASS_VPSUBQ)
-    {
+       opc==XED_ICLASS_PSUBQ || opc==XED_ICLASS_VPSUBQ){
         UINT32 lanes = QwordLanes(ins);
-        REG    km    = MaskReg(ins);
-        BOOL   msk   = km != REG_INVALID_;
-
+        REG km = MaskReg(ins);
         if(opc==XED_ICLASS_PADDQ || opc==XED_ICLASS_VPADDQ){
-            if(msk)
-                INS_InsertCall(ins, IPOINT_BEFORE,
-                    (AFUNPTR)SimdAddQMasked,
-                    IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID,
-                    IARG_UINT32, lanes, IARG_REG_VALUE, km,
-                    IARG_END);
-            else
-                INS_InsertCall(ins, IPOINT_BEFORE,
-                    (AFUNPTR)SimdAddQ,
-                    IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID,
-                    IARG_UINT32, lanes, IARG_END);
+            INS_InsertCall(ins, IPOINT_BEFORE,
+                km!=REG_INVALID_? (AFUNPTR)SimdAddQMasked : (AFUNPTR)SimdAddQ,
+                IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID,
+                IARG_UINT32, lanes,
+                km!=REG_INVALID_? IARG_REG_VALUE : IARG_UINT32,
+                km!=REG_INVALID_? km             : (ADDRINT)0,
+                IARG_END);
         }else{
-            if(msk)
-                INS_InsertCall(ins, IPOINT_BEFORE,
-                    (AFUNPTR)SimdSubQMasked,
-                    IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID,
-                    IARG_UINT32, lanes, IARG_REG_VALUE, km,
-                    IARG_END);
-            else
-                INS_InsertCall(ins, IPOINT_BEFORE,
-                    (AFUNPTR)SimdSubQ,
-                    IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID,
-                    IARG_UINT32, lanes, IARG_END);
+            INS_InsertCall(ins, IPOINT_BEFORE,
+                km!=REG_INVALID_? (AFUNPTR)SimdSubQMasked : (AFUNPTR)SimdSubQ,
+                IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID,
+                IARG_UINT32, lanes,
+                km!=REG_INVALID_? IARG_REG_VALUE : IARG_UINT32,
+                km!=REG_INVALID_? km             : (ADDRINT)0,
+                IARG_END);
         }
         return;
     }
 
-    /* scalar ALU ---------------------------------------------------- */
+    /* scalar ALU */
     if(!Is64ALU(opc)) return;
 
-    /* sanity‑channel for immediates */
     if(HasImm(ins)){
         INS_InsertCall(ins, IPOINT_BEFORE,
             (AFUNPTR)ImmOp,
             IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_END);
-        return;                 // exclude from main tallies
+        return;
     }
 
     BOOL rr = IsRegReg64(ins);
@@ -256,100 +239,74 @@ static VOID Instruction(INS ins, VOID*)
 
     AFUNPTR fn = nullptr;
     switch(opc){
-        /* add/sub/carry */
         case XED_ICLASS_ADD : fn = (AFUNPTR)(rr?add_rr:add_rm); break;
         case XED_ICLASS_SUB : fn = (AFUNPTR)(rr?sub_rr:sub_rm); break;
         case XED_ICLASS_ADC : fn = (AFUNPTR)(rr?adc_rr:adc_rm); break;
         case XED_ICLASS_SBB : fn = (AFUNPTR)(rr?sbb_rr:sbb_rm); break;
-
-        /* multiply family */
         case XED_ICLASS_IMUL:
         case XED_ICLASS_MUL : fn = (AFUNPTR)(rr?mul_rr:mul_rm); break;
         case XED_ICLASS_MULX: fn = (AFUNPTR)(rr?mulx_rr:mulx_rm); break;
         case XED_ICLASS_ADCX: fn = (AFUNPTR)(rr?adcx_rr:adcx_rm); break;
         case XED_ICLASS_ADOX: fn = (AFUNPTR)(rr?adox_rr:adox_rm); break;
-
-        /* divide */
         case XED_ICLASS_IDIV:
         case XED_ICLASS_DIV : fn = (AFUNPTR)(rr?div_rr:div_rm); break;
-
         default: return;
     }
-
     INS_InsertCall(ins, IPOINT_BEFORE, fn,
-                   IARG_FAST_ANALYSIS_CALL,
-                   IARG_THREAD_ID,
-                   IARG_END);
+                   IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_END);
 }
 
-// --------------------------- final report ---------------------------
+// --------------------------- final report --------------------------
 static VOID Fini(INT32, VOID*)
 {
     Cnts tot{};
-    for (auto* c : g_all) {
-        #define ADD(field) tot.field += c->field
-        ADD(add_rr);  ADD(sub_rr);  ADD(adc_rr);  ADD(sbb_rr);
-        ADD(mul_rr);  ADD(mulx_rr); ADD(adcx_rr); ADD(adox_rr); ADD(div_rr);
-        ADD(add_rm);  ADD(sub_rm);  ADD(adc_rm);  ADD(sbb_rm);
-        ADD(mul_rm);  ADD(mulx_rm); ADD(adcx_rm); ADD(adox_rm); ADD(div_rm);
-        ADD(simd_addq_insn); ADD(simd_addq_ops);
-        ADD(simd_subq_insn); ADD(simd_subq_ops);
+    for(auto* c: g_all){
+        #define ADD(f) tot.f += c->f
+        ADD(add_rr);ADD(sub_rr);ADD(adc_rr);ADD(sbb_rr);
+        ADD(mul_rr);ADD(mulx_rr);ADD(adcx_rr);ADD(adox_rr);ADD(div_rr);
+        ADD(add_rm);ADD(sub_rm);ADD(adc_rm);ADD(sbb_rm);
+        ADD(mul_rm);ADD(mulx_rm);ADD(adcx_rm);ADD(adox_rm);ADD(div_rm);
+        ADD(simd_addq_insn);ADD(simd_addq_ops);
+        ADD(simd_subq_insn);ADD(simd_subq_ops);
         ADD(imm_ops);
         delete c;
     }
 
-    if (knobVerbose.Value()) {
-        // ───── full per‑opcode dump ────────────────────────────────
-        std::cout << "--- 64‑bit integer arithmetic (no imm, no stack) ---\n"
-                  << "ADD   rr: " << tot.add_rr  << "   rm/mr: " << tot.add_rm  << '\n'
-                  << "SUB   rr: " << tot.sub_rr  << "   rm/mr: " << tot.sub_rm  << '\n'
-                  << "ADC   rr: " << tot.adc_rr  << "   rm/mr: " << tot.adc_rm  << '\n'
-                  << "SBB   rr: " << tot.sbb_rr  << "   rm/mr: " << tot.sbb_rm  << '\n'
-                  << "MUL   rr: " << tot.mul_rr  << "   rm/mr: " << tot.mul_rm  << '\n'
-                  << "MULX  rr: " << tot.mulx_rr << "   rm/mr: " << tot.mulx_rm << '\n'
-                  << "ADCX  rr: " << tot.adcx_rr << "   rm/mr: " << tot.adcx_rm << '\n'
-                  << "ADOX  rr: " << tot.adox_rr << "   rm/mr: " << tot.adox_rm << '\n'
-                  << "DIV   rr: " << tot.div_rr  << "   rm/mr: " << tot.div_rm  << '\n'
-                  << "SIMD ADDQ: " << tot.simd_addq_insn << " insns, "
-                  << tot.simd_addq_ops << " lane‑ops\n"
-                  << "SIMD SUBQ: " << tot.simd_subq_insn << " insns, "
-                  << tot.simd_subq_ops << " lane‑ops\n"
-                  << "IMMEDIATE (loops, stack ptr, etc.): "
-                  << tot.imm_ops << " insns\n";
-    } else {
-        // ───── compact default output ─────────────────────────────
-        auto ADD = tot.add_rr + tot.add_rm +
-                   tot.adc_rr + tot.adc_rm +
-                   tot.adcx_rr + tot.adcx_rm +
-                   tot.adox_rr + tot.adox_rm;
-
-        auto SUB = tot.sub_rr + tot.sub_rm +
-                   tot.sbb_rr + tot.sbb_rm;
-
-        auto MUL = tot.mul_rr + tot.mul_rm +
-                   tot.mulx_rr + tot.mulx_rm;
-
-        auto DIV = tot.div_rr + tot.div_rm;
-
-        std::cout << "--- 64‑bit integer arithmetic (filtered) ---\n"
-                  << "ADD: " << ADD << '\n'
-                  << "SUB: " << SUB << '\n'
-                  << "MUL: " << MUL << '\n'
-                  << "DIV: " << DIV << '\n';
+    if(knobVerbose.Value()){
+        std::cout<<"--- 64-bit integer arithmetic (within "<<knobFunc.Value()<<") ---\n"
+                 <<"ADD_rr "<<tot.add_rr<<"  ADD_rm "<<tot.add_rm<<"\n"
+                 <<"SUB_rr "<<tot.sub_rr<<"  SUB_rm "<<tot.sub_rm<<"\n"
+                 <<"MUL_rr "<<tot.mul_rr<<"  MUL_rm "<<tot.mul_rm<<"\n"
+                 <<"DIV_rr "<<tot.div_rr<<"  DIV_rm "<<tot.div_rm<<"\n"
+                 <<"SIMD ADDQ "<<tot.simd_addq_insn<<" insns / "
+                 <<tot.simd_addq_ops<<" ops\n"
+                 <<"SIMD SUBQ "<<tot.simd_subq_insn<<" insns / "
+                 <<tot.simd_subq_ops<<" ops\n"
+                 <<"IMM "<<tot.imm_ops<<" insns\n";
+    }else{
+        uint64_t ADD = tot.add_rr+tot.add_rm+tot.adc_rr+tot.adc_rm+
+                       tot.adcx_rr+tot.adcx_rm+tot.adox_rr+tot.adox_rm;
+        uint64_t SUB = tot.sub_rr+tot.sub_rm+tot.sbb_rr+tot.sbb_rm;
+        uint64_t MUL = tot.mul_rr+tot.mul_rm+tot.mulx_rr+tot.mulx_rm;
+        uint64_t DIV = tot.div_rr+tot.div_rm;
+        std::cout<<"--- 64-bit integer arithmetic ("<<knobFunc.Value()<<") ---\n"
+                 <<"ADD: "<<ADD<<"\nSUB: "<<SUB<<"\nMUL: "<<MUL<<"\nDIV: "<<DIV<<"\n";
     }
 }
 
-// ------------------------------ entry -------------------------------
+// -------------------------------- entry ----------------------------
 int main(int argc, char* argv[])
 {
     PIN_Init(argc, argv);
     PIN_InitLock(&g_lock);
-    g_tls = PIN_CreateThreadDataKey(nullptr);
+    g_tls_cnts = PIN_CreateThreadDataKey(nullptr);
+    g_tls_flag = PIN_CreateThreadDataKey(nullptr);
 
     PIN_AddThreadStartFunction(ThreadStart, nullptr);
+    IMG_AddInstrumentFunction(ImageLoad, nullptr);
     INS_AddInstrumentFunction(Instruction, nullptr);
     PIN_AddFiniFunction(Fini, nullptr);
 
-    PIN_StartProgram();   // never returns
+    PIN_StartProgram();
     return 0;
 }
