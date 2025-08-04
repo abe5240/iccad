@@ -1,51 +1,57 @@
 #!/usr/bin/env bash
 ###############################################################################
-# int64_profiler.sh – run Int64Profiler on any executable or script.
-#   • Default  : prints compact totals (ADD / SUB / MUL / DIV).
-#   • --verbose: prints full per-opcode report + SIMD + immediates.
+# int64_profiler.sh – run Int64Profiler
+#
+#   ./int64_profiler.sh <target> [function] [--verbose] [-- <prog-args…>]
+#
+#   • If <function> is omitted → count the whole program
+#   • If provided  → counts only inside that symbol using -addr 0x…
 ###############################################################################
 set -euo pipefail
 
-# ───────── config ─────────
 PIN_HOME="$HOME/pin-3.31"
 TOOL_SO="$PIN_HOME/source/tools/Int64Profiler/obj-intel64/Int64Profiler.so"
 
-# ───────── CLI parsing ─────────
+###############################################################################
+# 1. parse positional args
+###############################################################################
+[[ $# -ge 1 ]] || { echo "Usage: $(basename "$0") <target> [function]"; exit 1; }
+TARGET=$1; shift
+
+FUNC=""
+if [[ $# -gt 0 && $1 != --* ]]; then FUNC=$1; shift; fi
+
 VERBOSE=0
 if [[ "${1:-}" == "--verbose" ]]; then VERBOSE=1; shift; fi
-if [[ "${1:-}" =~ ^(-h|--help)$ || $# -lt 1 ]]; then
-  cat <<EOF
-Usage: $(basename "$0") [--verbose] <target> [-- <args>...]
+if [[ "${1:-}" == "--" ]]; then shift; fi   # discard separator
 
-Profiles 64-bit integer arithmetic via Intel Pin.
+###############################################################################
+# 2. sanity checks
+###############################################################################
+[[ -x "$TARGET" ]]   || { echo "Target $TARGET not executable"; exit 1; }
+[[ -f "$TOOL_SO" ]]  || { echo "Int64Profiler.so missing";    exit 1; }
 
-Examples:
-  ./int64_profiler.sh            ./my_binary
-  ./int64_profiler.sh --verbose ./script.py -- arg1 arg2
-EOF
-  exit 0
-fi
-
-TARGET="$1"; shift
-
-# ───────── sanity checks ─────────
-[[ -d "$PIN_HOME" ]] || { echo "Pin not found at $PIN_HOME"; exit 1; }
-[[ -f "$TOOL_SO"  ]] || { echo "Int64Profiler.so missing";  exit 1; }
-[[ -e "$TARGET"   ]] || { echo "Target $TARGET does not exist"; exit 1; }
-[[ -x "$TARGET"   ]] || { echo "Target $TARGET not executable"; exit 1; }
-
-# ───────── run pintool ─────────
+###############################################################################
+# 3. resolve symbol → address  (only if a function was given)
+###############################################################################
 PIN_ARGS=()
-(( VERBOSE )) && PIN_ARGS+=("-verbose" "1")
-
-RAW=$(
-  { "$PIN_HOME/pin" -t "$TOOL_SO" "${PIN_ARGS[@]}" -- "$TARGET" "$@" 2>/dev/null; } \
-  | tee /dev/tty
-)
-
-# ───────── print result ─────────
-if (( VERBOSE )); then
-  echo "$RAW"
+if [[ -n "$FUNC" ]]; then
+  ADDR=$(nm "$TARGET" | awk -v f="$FUNC" '$3==f && $2=="T"{print $1; exit}')
+  [[ -n "$ADDR" ]] || { echo "Function '$FUNC' not found"; exit 1; }
+  echo "📍  Profiling only $FUNC() @ 0x$ADDR"
+  PIN_ARGS+=( -addr "0x$ADDR" )
 else
+  echo "📍  Profiling entire process"
+fi
+(( VERBOSE )) && PIN_ARGS+=( -verbose 1 )
+
+###############################################################################
+# 4. run Pin
+###############################################################################
+echo "🔷  Running Pin…"
+if (( VERBOSE )); then
+  "$PIN_HOME/pin" -t "$TOOL_SO" "${PIN_ARGS[@]}" -- "$TARGET" "$@"
+else
+  RAW=$( "$PIN_HOME/pin" -t "$TOOL_SO" "${PIN_ARGS[@]}" -- "$TARGET" "$@" )
   echo "$RAW" | grep -E '^(ADD:|SUB:|MUL:|DIV:)'
 fi

@@ -1,29 +1,27 @@
+
 #include <cstdint>
-#include <cstdlib>
-#include <new>      // std::nothrow
-#include <iostream> // optional: error message
+#include <cstdio>
 
-int main()
+extern "C" __attribute__((noinline,optimize("O0")))
+void toBenchmark()
 {
-    constexpr std::size_t N = 1ULL << 30;          // 1 GiB
-    constexpr std::size_t LINE = 64;               // cache-line size
-
-    // 64-byte aligned allocation (C++17). std::aligned_alloc returns void*
-    std::uint8_t* p = static_cast<std::uint8_t*>(
-        std::aligned_alloc(LINE, N));
-
-    if (!p) { std::cerr << "alloc failed\n"; return 1; }
-
-    /* First pass: write 0 – forces physical pages in and issues a
-       read-for-ownership + store per 64-B line. */
-    for (std::size_t i = 0; i < N; i += LINE)
-        *reinterpret_cast<volatile std::uint64_t*>(p + i) = 0;
-
-    /* Second pass: cold-read each line (optional sanity). */
-    std::uint64_t sum = 0;
-    for (std::size_t i = 0; i < N; i += LINE)
-        sum += *reinterpret_cast<volatile std::uint64_t*>(p + i);
-
-    std::free(p);
-    return static_cast<int>(sum);                  // defeat dead-code removal
+    constexpr int N = 1'000;
+    uint64_t a=1,b=2,c=3,d=5;
+    for(int i=0;i<N;++i){
+        asm volatile(
+          "addq  %[b], %[a]\n\t"
+          "subq  %[d], %[c]\n\t"
+          "imulq %[a], %[b]\n\t"
+          "xorq  %%rdx, %%rdx\n\t"
+          "movq  %[a], %%rax\n\t"
+          "divq  %[c]\n\t"
+          :[a]"+r"(a),[b]"+r"(b),[c]"+r"(c)
+          :[d]"r"(d) : "rax","rdx","cc");
+    }
+    std::printf("%llu %llu %llu\n",
+        (unsigned long long)a,
+        (unsigned long long)b,
+        (unsigned long long)c);
 }
+
+int main(){ toBenchmark(); }

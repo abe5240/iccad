@@ -11,7 +11,7 @@
 #   • intel_uncore driver loaded so the alias events exist.
 #
 # EXAMPLE
-#   sudo ./dram_profiler.sh ./touch1gb
+#   sudo ./dram_profiler.sh ./my_program
 ###############################################################################
 set -euo pipefail
 
