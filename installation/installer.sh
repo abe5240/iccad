@@ -42,8 +42,8 @@ ok(){   echo    "✔️ $*";   }
 # 1. packages
 ###############################################################################
 step "Installing build & perf prerequisites"
-sudo apt-get update -qq
-sudo apt-get install -y --no-install-recommends \
+sudo apt-get -qq update
+sudo apt-get -qq install -y --no-install-recommends \
      build-essential git ca-certificates \
      linux-tools-common linux-tools-$(uname -r) \
      msr-tools
