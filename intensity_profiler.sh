@@ -40,7 +40,7 @@ hr_bytes () {
         'BEGIN {printf "%.2f %s", b/(1024^e), u}'
 }
 
-# ───────── step 1 – integer operations ─────────
+# ───────── step 1 – integer operations ─────────
 PIN_ARGS=(); (( VERBOSE )) && PIN_ARGS+=("-verbose" "1")
 RAW=$( { "$PIN_HOME/pin" -t "$TOOL_SO" "${PIN_ARGS[@]}" -- "$TARGET" "$@" ; } \
        2>&1 | tee /dev/tty )
@@ -50,7 +50,7 @@ if (( VERBOSE )); then echo "$RAW"; fi
 INT_OPS=$(echo "$RAW" | \
           awk '/^(ADD:|SUB:|MUL:|DIV:)/ {gsub(/[,]/,"",$2); sum+=$2} END{print sum+0}')
 
-# ───────── step 2 – DRAM traffic ─────────
+# ───────── step 2 – DRAM traffic ─────────
 if perf list 2>/dev/null | grep -q 'uncore_imc/cas_count_read/'; then
     EVENTS="uncore_imc/cas_count_read/,uncore_imc/cas_count_write/"
 else
@@ -59,11 +59,53 @@ fi
 
 PERF=$(sudo perf stat -x, --no-scale -a -e "$EVENTS" -- "$TARGET" "$@" 2>&1 >/dev/null)
 
-READS=$(echo "$PERF" | awk -F',' '/cas_count_read/  {gsub(/[^0-9]/,"",$1); sum+=$1} END{print sum+0}')
-WRITES=$(echo "$PERF" | awk -F',' '/cas_count_write/ {gsub(/[^0-9]/,"",$1); sum+=$1} END{print sum+0}')
-BYTES=$(( 64 * (READS + WRITES) ))
+# ───────── helper: parse perf value with unit ─────────
+parse_perf_value() {
+    local line=$1
+    local value=$(echo "$line" | cut -d',' -f1)
+    local unit=$(echo "$line" | cut -d',' -f2)
+    
+    # Convert decimal value to integer for bash arithmetic
+    local int_val=$(echo "$value" | awk '{printf "%.0f", $1}')
+    
+    # Convert to bytes based on unit
+    case "$unit" in
+        "MiB") echo $(( int_val * 1048576 )) ;;
+        "GiB") echo $(( int_val * 1073741824 )) ;;
+        "KiB") echo $(( int_val * 1024 )) ;;
+        "B"|"") echo "$int_val" ;;
+        *) 
+            # No unit or unknown unit - assume raw cache line count
+            echo $(( int_val * 64 )) ;;
+    esac
+}
 
-# ───────── step 3 – compute intensity ─────────
+# Parse DRAM traffic with proper unit handling
+READ_BYTES=0
+WRITE_BYTES=0
+
+# Process all read events
+while IFS= read -r line; do
+    if [[ -n "$line" ]]; then
+        bytes=$(parse_perf_value "$line")
+        READ_BYTES=$(( READ_BYTES + bytes ))
+    fi
+done < <(echo "$PERF" | grep -i "cas_count_read")
+
+# Process all write events
+while IFS= read -r line; do
+    if [[ -n "$line" ]]; then
+        bytes=$(parse_perf_value "$line")
+        WRITE_BYTES=$(( WRITE_BYTES + bytes ))
+    fi
+done < <(echo "$PERF" | grep -i "cas_count_write")
+
+# Total bytes and cache lines
+BYTES=$(( READ_BYTES + WRITE_BYTES ))
+READS=$(( READ_BYTES / 64 ))
+WRITES=$(( WRITE_BYTES / 64 ))
+
+# ───────── step 3 – compute intensity ─────────
 if (( BYTES == 0 )); then
     INTENSITY="n/a"
 else
@@ -74,7 +116,7 @@ fi
 echo
 printf "=== Integer Intensity Report ===\n"
 printf "Integer ops : %'d\n"         "$INT_OPS"
-printf "DRAM reads  : %'d lines (%s)\n"  "$READS"  "$(hr_bytes $((64*READS)))"
-printf "DRAM writes : %'d lines (%s)\n"  "$WRITES" "$(hr_bytes $((64*WRITES)))"
+printf "DRAM reads  : %'d lines (%s)\n"  "$READS"  "$(hr_bytes $READ_BYTES)"
+printf "DRAM writes : %'d lines (%s)\n"  "$WRITES" "$(hr_bytes $WRITE_BYTES)"
 printf "Total bytes : %s\n"              "$(hr_bytes $BYTES)"
 printf "Intensity   : %s ops/byte\n"     "$INTENSITY"
