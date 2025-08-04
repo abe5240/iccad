@@ -1,41 +1,51 @@
-// int64_ops.cpp – Pin 3.31 (region-gated version)
+// int64_ops.cpp – Pin 3.31 (counts only while `toBenchmark()` runs)
 //
-// Counts 64-bit scalar integer arithmetic only while the user-defined
-// routine `toBenchmark()` is active.
+// Build:
+//   make -C $PIN_HOME/source/tools/Int64Profiler \
+//        PIN_CXXFLAGS_EXTRA="-std=c++17" \
+///       obj-intel64/int64_ops.so
 //
-// Build:  make -C $PIN_HOME/source/tools/Int64Profiler
-//--------------------------------------------------------------------
+// Run:
+//   $PIN_HOME/pin -t $PIN_HOME/source/tools/Int64Profiler/obj-int64/int64_ops.so \
+//     -- ./your_program
+//   (add -func <name> to profile a different routine)
+//
+// ------------------------------------------------------------------
 #include "pin.H"
 #include <iostream>
-#include <vector>
 #include <algorithm>
+#include <vector>
+#include <string>          
 
-// -------------------- command-line knob ----------------------------
-KNOB<string> knobFunc(KNOB_MODE_WRITEONCE, "pintool",
-                     "func", "toBenchmark",
-                     "Name of function whose body should be counted");
-KNOB<BOOL>   knobVerbose(KNOB_MODE_WRITEONCE, "pintool",
-                     "verbose", "0",
-                     "Print full per-opcode breakdown");
+// ───────── command-line knobs ─────────
+KNOB<std::string> knobFunc(
+    KNOB_MODE_WRITEONCE, "pintool",
+    "func", "toBenchmark",
+    "Name of function whose body should be counted");
 
-// ----------------- compile-time filters ----------------------------
-static constexpr bool kExcludeImms   = true;
-static constexpr bool kExcludeStack  = true;
-static constexpr bool kCountMemRmw   = true;
+KNOB<BOOL> knobVerbose(
+    KNOB_MODE_WRITEONCE, "pintool",
+    "verbose", "0",
+    "Print full per-opcode breakdown");
 
-// ------------------ per-thread counters (aligned) ------------------
+// ───────── compile-time filters ─────────
+static constexpr bool kExcludeImms  = true;
+static constexpr bool kExcludeStack = true;
+static constexpr bool kCountMemRmw  = true;
+
+// ───────── per-thread counters ─────────
 struct alignas(64) Cnts {
-    UINT64 add_rr{},  sub_rr{},  adc_rr{},  sbb_rr{};
-    UINT64 mul_rr{},  mulx_rr{}, adcx_rr{}, adox_rr{}, div_rr{};
-    UINT64 add_rm{},  sub_rm{},  adc_rm{},  sbb_rm{};
-    UINT64 mul_rm{},  mulx_rm{}, adcx_rm{}, adox_rm{}, div_rm{};
+    UINT64 add_rr{}, sub_rr{}, adc_rr{}, sbb_rr{};
+    UINT64 mul_rr{}, mulx_rr{}, adcx_rr{}, adox_rr{}, div_rr{};
+    UINT64 add_rm{}, sub_rm{}, adc_rm{}, sbb_rm{};
+    UINT64 mul_rm{}, mulx_rm{}, adcx_rm{}, adox_rm{}, div_rm{};
     UINT64 simd_addq_insn{}, simd_addq_ops{};
     UINT64 simd_subq_insn{}, simd_subq_ops{};
     UINT64 imm_ops{};
 };
-// bookkeeping
-static TLS_KEY            g_tls_cnts;
-static TLS_KEY            g_tls_flag;          // bool: counting ?
+
+static TLS_KEY            g_tls_cnts;   // pointer → Cnts
+static TLS_KEY            g_tls_flag;   // nullptr / non-nullptr = counting?
 static std::vector<Cnts*> g_all;
 static PIN_LOCK           g_lock;
 
@@ -45,7 +55,7 @@ static inline Cnts* C(THREADID t)
 static inline bool Counting(THREADID t)
 { return PIN_GetThreadData(g_tls_flag, t) != nullptr; }
 
-// ------------------ fast increment helpers ------------------------
+// ───────── fast increment helpers ─────────
 #define FAST PIN_FAST_ANALYSIS_CALL
 #define DEF_FAST(fn) static VOID FAST fn(THREADID t){ C(t)->fn++; }
 
@@ -77,7 +87,7 @@ static VOID FAST SimdSubQMasked (THREADID t, UINT32 n, ADDRINT m)
 static VOID FAST ImmOp(THREADID t)
 { C(t)->imm_ops++; }
 
-// -------------------------- helpers -------------------------------
+// ───────── helpers ─────────
 static inline BOOL Is64Gpr(REG r){ return REG_is_gr64(r); }
 static inline BOOL IsStackRg(REG r){ return r==REG_RSP || r==REG_RBP; }
 
@@ -136,7 +146,7 @@ static inline REG MaskReg(INS ins){
     return REG_INVALID_;
 }
 
-// ----------------- opcode classifier ------------------------------
+// ───────── opcode classifiers ─────────
 static inline BOOL Is64ALU(xed_iclass_enum_t o)
 {
     switch(o){
@@ -162,7 +172,7 @@ static inline BOOL IsRegMem64(INS ins){
     return mr || rmw;
 }
 
-// ---------------- thread lifecycle --------------------------------
+// ───────── thread lifecycle ─────────
 static VOID ThreadStart(THREADID tid, CONTEXT*, INT32, VOID*)
 {
     auto* c = new Cnts;
@@ -174,7 +184,7 @@ static VOID ThreadStart(THREADID tid, CONTEXT*, INT32, VOID*)
     PIN_ReleaseLock(&g_lock);
 }
 
-// ---------------- function-entry toggles --------------------------
+// ───────── region toggles ─────────
 static VOID Enter(THREADID t) { PIN_SetThreadData(g_tls_flag,(VOID*)1,t); }
 static VOID Leave(THREADID t) { PIN_SetThreadData(g_tls_flag,nullptr,t); }
 
@@ -191,7 +201,7 @@ static VOID ImageLoad(IMG img, VOID*)
     RTN_Close(rtn);
 }
 
-// ---------------------- instrumentation ---------------------------
+// ───────── instruction instrumentation ─────────
 static VOID Instruction(INS ins, VOID*)
 {
     if(!Counting(PIN_ThreadId())) return;
@@ -227,9 +237,8 @@ static VOID Instruction(INS ins, VOID*)
     if(!Is64ALU(opc)) return;
 
     if(HasImm(ins)){
-        INS_InsertCall(ins, IPOINT_BEFORE,
-            (AFUNPTR)ImmOp,
-            IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_END);
+        INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)ImmOp,
+                       IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_END);
         return;
     }
 
@@ -256,7 +265,7 @@ static VOID Instruction(INS ins, VOID*)
                    IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_END);
 }
 
-// --------------------------- final report --------------------------
+// ───────── final report ─────────
 static VOID Fini(INT32, VOID*)
 {
     Cnts tot{};
@@ -273,7 +282,8 @@ static VOID Fini(INT32, VOID*)
     }
 
     if(knobVerbose.Value()){
-        std::cout<<"--- 64-bit integer arithmetic (within "<<knobFunc.Value()<<") ---\n"
+        std::cout<<"--- 64-bit integer arithmetic (inside "
+                 <<knobFunc.Value()<<") ---\n"
                  <<"ADD_rr "<<tot.add_rr<<"  ADD_rm "<<tot.add_rm<<"\n"
                  <<"SUB_rr "<<tot.sub_rr<<"  SUB_rm "<<tot.sub_rm<<"\n"
                  <<"MUL_rr "<<tot.mul_rr<<"  MUL_rm "<<tot.mul_rm<<"\n"
@@ -294,7 +304,7 @@ static VOID Fini(INT32, VOID*)
     }
 }
 
-// -------------------------------- entry ----------------------------
+// ───────── entry ─────────
 int main(int argc, char* argv[])
 {
     PIN_Init(argc, argv);
