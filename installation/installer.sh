@@ -204,3 +204,9 @@ printf "Intensity   : %s ops/byte\n" "$AI"
 
 echo
 ok "Installation complete (log: $LOG)"
+echo
+echo "🔸 IMPORTANT: Performance counter access has been configured:"
+echo "   • perf_event_paranoid set to -1 (permanent)"
+echo "   • intel_uncore module set to auto-load on boot"
+echo "   • You can now run perf and the profiler scripts WITHOUT sudo"
+echo "   • These settings will persist across reboots"
