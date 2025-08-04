@@ -71,10 +71,10 @@ WRITE_LINES=0
 
 # parse “Reads :    123 lines (…”
 while read -r line; do
-  case "$line" in
-    *Reads* )  READ_LINES=$(  awk '{gsub(/,/, "", $3); print $3}' <<<"$line");;
-    *Writes* ) WRITE_LINES=$( awk '{gsub(/,/, "", $3); print $3}' <<<"$line");;
-  esac
+    case "$line" in
+        *Reads*)  READ_LINES=$(grep -oE '[0-9,]+' <<<"$line" | head -1 | tr -d ,);;
+        *Writes*) WRITE_LINES=$(grep -oE '[0-9,]+' <<<"$line" | head -1 | tr -d ,);;
+    esac
 done <<<"$DRAM_RAW"
 
 # ensure vars exist even if grep failed

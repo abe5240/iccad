@@ -26,7 +26,7 @@ TOOL_NAME="Int64Profiler"
 TOOL_DIR="$PIN_HOME/source/tools/${TOOL_NAME}"
 PIN_TAR="$INSTALL_DIR/intel-pin-linux.tar.gz"
 
-SRC_CPP="$INSTALL_DIR/int64_ops.cpp"           # pintool source (new version)
+SRC_CPP="$INSTALL_DIR/int64_ops.cpp"           # pintool source 
 TEST_CPP="$INSTALL_DIR/test_installation.cpp"  # tiny benchmark
 TEST_BIN="/tmp/test_installation"
 
