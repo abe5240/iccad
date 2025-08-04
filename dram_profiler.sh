@@ -26,10 +26,9 @@ hr_bytes() {                       # $1 = integer bytes
     awk -vB="$1" -vE="$i" -vU="${u[$i]}" 'BEGIN{printf "%.2f %s",B/(1024^E),U}'
 }
 
-######################## 3. verify alias events exist #########################
+######################## 3. Setup events #######################################
 ALIAS_RD="uncore_imc/cas_count_read/"
 ALIAS_WR="uncore_imc/cas_count_write/"
-
 EVENTS="${ALIAS_RD},${ALIAS_WR}"
 echo "🔷 Measuring via events: $EVENTS"
 
@@ -77,4 +76,5 @@ total_bytes=$((read_bytes + write_bytes))
 ######################## 6. summary ###########################################
 printf "\n--- DRAM traffic (64-B cache-lines) ---\n"
 printf "Reads : %'15d lines  (%s)\n" "$read_lines"  "$(hr_bytes $read_bytes)"
-printf "Writes: %'15d lines  (%s)\n"
+printf "Writes: %'15d lines  (%s)\n" "$write_lines" "$(hr_bytes $write_bytes)"
+printf "Total : %s\n"               "$(hr_bytes $total_bytes)"
