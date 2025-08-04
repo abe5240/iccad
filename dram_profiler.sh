@@ -2,77 +2,71 @@
 ###############################################################################
 # dram_profiler.sh
 #
-# Measure DRAM traffic (64-byte cache-line reads & writes) for any command.
-#   • Works on Intel server CPUs Skylake → Sapphire-Rapids.
-#   • Requires root *or* perf_event_paranoid=0.
-#   • Needs the intel_uncore driver for the iMC alias events.
+# Measure DRAM traffic (iMC CAS-COUNT read & write lines) for any command.
+#   * Works on Intel server CPUs (Skylake → Sapphire-Rapids).
+#   * Counts 64-byte cache-line transfers; prints human-readable bytes.
 #
-# Example:
+# REQUIREMENTS
+#   • Run the script with sudo   ──OR──   set /proc/sys/kernel/perf_event_paranoid to 0
+#   • intel_uncore driver loaded so the alias events exist.
+#
+# EXAMPLE
 #   sudo ./dram_profiler.sh ./touch1gb
 ###############################################################################
-
 set -euo pipefail
 
-################################### Helpers ###################################
-# Use sudo only if we're not already root.
-SUDO='' ; ((EUID)) && SUDO=sudo
+######################## 1. argument check ####################################
+[[ $# -lt 1 ]] && { echo "Usage: $(basename "$0") <command> [args]" >&2; exit 1; }
+CMD=( "$@" )
 
-# Pretty-print bytes in human-readable units.
-hr_bytes() {
-    local bytes=$1
-    local units=(B KB MB GB TB PB)
-    local idx=0
-    while (( bytes >= 1024 && idx < ${#units[@]}-1 )); do
-        bytes=$((bytes / 1024))
-        ((idx++))
-    done
-    awk -vB="$1" -vE="$idx" -vU="${units[$idx]}" \
-        'BEGIN { printf "%.2f %s", B/(1024^E), U }'
+######################## 2. helper: human-readable bytes ######################
+hr_bytes() {                       # $1 = integer bytes
+    local b=$1; local u=(B KB MB GB TB PB); local i=0
+    while (( b>=1024 && i<${#u[@]}-1 )); do b=$((b/1024)); ((i++)); done
+    awk -vB="$1" -vE="$i" -vU="${u[$i]}" 'BEGIN{printf "%.2f %s",B/(1024^E),U}'
 }
 
-################################ Arg & driver check ###########################
-[[ $# -lt 1 ]] && {
-    echo "Usage: $(basename "$0") <command> [args]" >&2
-    exit 1
-}
-
-# Load intel_uncore if not already present. Ignore failure on non-Intel CPUs.
-$SUDO modprobe intel_uncore 2>/dev/null || true
-# Fallback: a dummy perf call also autoloads the module.
-$SUDO perf stat -x, -e cycles -- true 2>/dev/null || true
-
-################################ Event aliases ################################
+######################## 3. verify alias events exist #########################
 ALIAS_RD="uncore_imc/cas_count_read/"
 ALIAS_WR="uncore_imc/cas_count_write/"
 
-if ! $SUDO perf list | grep -q "$ALIAS_RD"; then
-    cat >&2 <<EOF
+# Try running a quick perf stat to see if the events work
+# This is more reliable than parsing perf list output
+if ! sudo perf stat -x, --no-scale -a -e "${ALIAS_RD},${ALIAS_WR}" -- sleep 0.001 2>&1 | grep -q "cas_count"; then
+    # Fallback: check if perf list shows the events (with more flexible matching)
+    if ! sudo perf list 2>/dev/null | grep -E "(cas_count_read|cas_count_write)" >/dev/null; then
+        cat >&2 <<EOF
 ❌  iMC CAS-COUNT alias events not available.
-    • intel_uncore module failed to load?
-    • Non-Intel CPU or very old kernel?
+    • Is the intel_uncore driver loaded?
+    • Are you running this script with sudo *or* perf_event_paranoid=0?
 EOF
-    exit 1
+        exit 1
+    fi
 fi
 
 EVENTS="${ALIAS_RD},${ALIAS_WR}"
 echo "🔷 Measuring via events: $EVENTS"
 
-################################ Run perf stat ################################
-CMD=( "$@" )
-CSV=$($SUDO perf stat -x, --no-scale -a -e "$EVENTS" \
-      -- "${CMD[@]}" 2>&1 | tee /dev/tty)
+######################## 4. run perf stat (CSV) ################################
+# Run perf stat and capture both stdout and stderr
+TMPFILE=$(mktemp)
+sudo perf stat -x, --no-scale -a -e "$EVENTS" -- "${CMD[@]}" 2>"$TMPFILE"
+CSV=$(cat "$TMPFILE")
+rm -f "$TMPFILE"
 
-################################ Parse counters ###############################
-reads=$( echo "$CSV" | awk -F',' '/cas_count_read/  {
-             gsub(/[^0-9]/,"",$1); r+=$1 } END { print r+0 }')
+######################## 5. parse counts #######################################
+# More robust parsing that handles different output formats
+reads=$( echo "$CSV" | grep -i "cas_count_read" | head -1 | cut -d',' -f1 | tr -cd '0-9')
+writes=$(echo "$CSV" | grep -i "cas_count_write" | head -1 | cut -d',' -f1 | tr -cd '0-9')
 
-writes=$(echo "$CSV" | awk -F',' '/cas_count_write/ {
-             gsub(/[^0-9]/,"",$1); w+=$1 } END { print w+0 }')
+# Default to 0 if parsing fails
+reads=${reads:-0}
+writes=${writes:-0}
 
-total_bytes=$((64 * (reads + writes)))
+total_bytes=$((64*(reads+writes)))
 
-################################## Summary ####################################
+######################## 6. summary ###########################################
 printf "\n--- DRAM traffic (64-B cache-lines) ---\n"
-printf "Reads : %'15d lines  (%s)\n"  "$reads"  "$(hr_bytes $((64*reads)))"
-printf "Writes: %'15d lines  (%s)\n"  "$writes" "$(hr_bytes $((64*writes)))"
-printf "Total : %s\n"                 "$(hr_bytes $total_bytes)"
+printf "Reads : %'15d lines  (%s)\n" "$reads"  "$(hr_bytes $((64*reads)))"
+printf "Writes: %'15d lines  (%s)\n" "$writes" "$(hr_bytes $((64*writes)))"
+printf "Total : %s\n"               "$(hr_bytes $total_bytes)"
