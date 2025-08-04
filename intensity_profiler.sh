@@ -65,22 +65,18 @@ INT_OPS=$(echo "$INT_RAW" |
 ###############################################################################
 # 5. run dram_profiler.sh → DRAM traffic
 ###############################################################################
-DRAM_RAW=$("$DRAM_SH" "$TARGET" "${EXTRA_ARGS[@]}")
-READ_LINES=0
-WRITE_LINES=0
+DRAM_RAW=$("$DRAM" "$TARGET" "${EXTRA_ARGS[@]}")
 
-# parse “Reads :    123 lines (…”
-while read -r line; do
-  case "$line" in
-    *Reads* )  READ_LINES=$(  awk '{gsub(/,/, "", $3); print $3}' <<<"$line");;
-    *Writes* ) WRITE_LINES=$( awk '{gsub(/,/, "", $3); print $3}' <<<"$line");;
-  esac
-done <<<"$DRAM_RAW"
+# Extract raw line counts. The output of awk could be empty if the pattern
+# isn't found in the DRAM_RAW output.
+READ_LINES_RAW=$( echo "$DRAM_RAW" | awk '/Reads/ {gsub(/[,]/,"",$3); print $3}')
+WRITE_LINES_RAW=$(echo "$DRAM_RAW" | awk '/Writes/ {gsub(/[,]/,"",$3); print $3}')
 
-# ensure vars exist even if grep failed
-READ_LINES=${READ_LINES:-0}
-WRITE_LINES=${WRITE_LINES:-0}
+# Set lines to 0 if the variables are empty to prevent "unbound variable" errors.
+READ_LINES=${READ_LINES_RAW:-0}
+WRITE_LINES=${WRITE_LINES_RAW:-0}
 
+# Calculate byte totals (assuming a 64-byte cache line size).
 READ_BYTES=$(( READ_LINES  * 64 ))
 WRITE_BYTES=$(( WRITE_LINES * 64 ))
 TOTAL_BYTES=$(( READ_BYTES + WRITE_BYTES ))
