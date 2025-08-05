@@ -1,304 +1,239 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Int64Profiler.cpp  –  Intel® Pin 3.31
 //
-//   Purpose     : Count *64-bit scalar* integer arithmetic instructions
+//   Purpose     : Count *64‑bit scalar* integer arithmetic instructions
 //                 (ADD/SUB/ADC/SBB/MUL/IMUL/MULX/AD*X/DIV/IDIV) either
 //                 • for the *entire* program               (default),   or
 //                 • only while execution is within a region bounded by
-//                   <start-address> … first RET            (-addr 0xXXXX).
+//                   <start-address> … matching RET         (-addr 0xXXXX).
 //
 //   Build inside the tool tree:
 //       cd $PIN_HOME/source/tools/Int64Profiler
 //       make                 # produces obj-intel64/Int64Profiler.so
 //
-//   Common runtime examples:
+//   Runtime examples:
 //       # whole program
 //       pin -t Int64Profiler.so -- ./app
 //
-//       # only inside toBenchmark()
+//       # toBenchmark() only
 //       ADDR=$(nm ./app | awk '$3=="toBenchmark"&&$2=="T"{print "0x"$1}')
 //       pin -t Int64Profiler.so -addr $ADDR -- ./app
-//
-//   Output (compact):
-//       ADD: <total>
-//       SUB: <total>
-//       MUL: <total>
-//       DIV: <total>
 // ─────────────────────────────────────────────────────────────────────────────
 #include "pin.H"
-#include <algorithm>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>
 #include <vector>
 
-//------------------------------------------------------------------------------
-//  Command-line knob
-//------------------------------------------------------------------------------
+// ── knob ─────────────────────────────────────────────────────────────────────
 KNOB<std::string> knobAddr(KNOB_MODE_WRITEONCE, "pintool",
                            "addr", "0x0",
-                           "Hex start address (0 → count whole program)");
+                           "Hex start address (0 → whole program)");
 
-//------------------------------------------------------------------------------
-//  Per-thread counters  (aligned to avoid false sharing)
-//------------------------------------------------------------------------------
+// ── per‑thread state ─────────────────────────────────────────────────────────
 struct alignas(64) Cnts {
-    /* register-to-register */
     UINT64 add_rr{}, sub_rr{}, adc_rr{}, sbb_rr{};
     UINT64 mul_rr{}, mulx_rr{}, adcx_rr{}, adox_rr{}, div_rr{};
-
-    /* register↔memory (8-byte operands only) */
     UINT64 add_rm{}, sub_rm{}, adc_rm{}, sbb_rm{};
     UINT64 mul_rm{}, mulx_rm{}, adcx_rm{}, adox_rm{}, div_rm{};
 };
 
-//------------------------------------------------------------------------------
-//  Globals
-//------------------------------------------------------------------------------
-static TLS_KEY g_tlsCnts;   // → Cnts per thread
-static TLS_KEY g_tlsFlag;   // nullptr  : not counting
-                            // non-null : counting region active
+struct alignas(64) ThreadState {
+    Cnts  cnts;
+    int   depth = 0;      // >0 → inside the region
+};
 
-static PIN_LOCK           g_lock;
-static std::vector<Cnts*> g_all;   // collect per-thread objects at fini
+static TLS_KEY                   tlsKey;
+static PIN_LOCK                  g_lock;
+static std::vector<ThreadState*> g_all;
 
-static ADDRINT g_startAddr = 0;    // 0 ⇒ whole program (no gating)
-static bool    g_wholeProg = true; // true when addr knob == 0
+static ADDRINT g_addr   = 0;   // start instruction
+static bool    g_whole  = true;
 
-//------------------------------------------------------------------------------
-//  Convenience accessors
-//------------------------------------------------------------------------------
-static inline Cnts* C(THREADID tid) {
-    return static_cast<Cnts*>(PIN_GetThreadData(g_tlsCnts, tid));
+// ── helpers ──────────────────────────────────────────────────────────────────
+static inline ThreadState* St(THREADID tid) {
+    return static_cast<ThreadState*>(PIN_GetThreadData(tlsKey, tid));
 }
-
 static inline bool Counting(THREADID tid) {
-    /*  Whole-program mode → always true.
-        Region-gated mode  → check TLS flag.                     */
-    return g_wholeProg ||
-           PIN_GetThreadData(g_tlsFlag, tid) != nullptr;
+    return g_whole || (St(tid)->depth > 0);
 }
 
-//------------------------------------------------------------------------------
-//  Region-toggle helpers (used only when g_wholeProg == false)
-//------------------------------------------------------------------------------
-static VOID PIN_FAST_ANALYSIS_CALL StartRegion(THREADID tid) {
-    PIN_SetThreadData(g_tlsFlag, reinterpret_cast<void*>(1), tid);
-}
+// region toggles – only inserted on the routine selected by -addr
+static VOID PIN_FAST_ANALYSIS_CALL Enter(THREADID tid) { ++St(tid)->depth; }
+static VOID PIN_FAST_ANALYSIS_CALL Exit (THREADID tid) { --St(tid)->depth; }
 
-static VOID PIN_FAST_ANALYSIS_CALL StopRegion(THREADID tid) {
-    PIN_SetThreadData(g_tlsFlag, nullptr, tid);
-}
-
-//------------------------------------------------------------------------------
-//  Fast counter macro – increments only when Counting() is true
-//------------------------------------------------------------------------------
+// fast counters (auto‑generated)
 #define FAST PIN_FAST_ANALYSIS_CALL
-#define DEF_FAST(name)                                   \
-    static VOID FAST name(THREADID tid) {                \
-        if (Counting(tid)) C(tid)->name++;               \
-    }
+#define DEF(name) \
+    static VOID FAST name(THREADID tid) { if (Counting(tid)) St(tid)->cnts.name++; }
 
-DEF_FAST(add_rr)  DEF_FAST(sub_rr)  DEF_FAST(adc_rr)  DEF_FAST(sbb_rr)
-DEF_FAST(mul_rr)  DEF_FAST(mulx_rr) DEF_FAST(adcx_rr) DEF_FAST(adox_rr)
-DEF_FAST(div_rr)
-DEF_FAST(add_rm)  DEF_FAST(sub_rm)  DEF_FAST(adc_rm)  DEF_FAST(sbb_rm)
-DEF_FAST(mul_rm)  DEF_FAST(mulx_rm) DEF_FAST(adcx_rm) DEF_FAST(adox_rm)
-DEF_FAST(div_rm)
+DEF(add_rr)  DEF(sub_rr)  DEF(adc_rr)  DEF(sbb_rr)
+DEF(mul_rr)  DEF(mulx_rr) DEF(adcx_rr) DEF(adox_rr) DEF(div_rr)
+DEF(add_rm)  DEF(sub_rm)  DEF(adc_rm)  DEF(sbb_rm)
+DEF(mul_rm)  DEF(mulx_rm) DEF(adcx_rm) DEF(adox_rm) DEF(div_rm)
 
-//------------------------------------------------------------------------------
-//  Helpers for instruction classification
-//------------------------------------------------------------------------------
-static inline bool Is64Gpr(REG r)     { return REG_is_gr64(r); }
-static inline bool IsStackReg(REG r)  { return r == REG_RSP || r == REG_RBP; }
+// ── classification helpers (unchanged from your last version) ───────────────
+static inline bool Is64Gpr(REG r){ return REG_is_gr64(r); }
+static inline bool IsStack(REG r){ return r==REG_RSP || r==REG_RBP; }
 
-static inline bool HasImm(INS ins) {
-    for (UINT32 i = 0; i < INS_OperandCount(ins); ++i)
-        if (INS_OperandIsImmediate(ins, i)) return true;
+static inline bool HasImm(INS ins){
+    for (UINT32 i=0;i<INS_OperandCount(ins);++i)
+        if (INS_OperandIsImmediate(ins,i)) return true;
     return false;
 }
-
-static inline bool TouchesStack(INS ins) {
-    for (UINT32 i = 0; i < INS_MaxNumRRegs(ins); ++i)
-        if (IsStackReg(INS_RegR(ins, i))) return true;
-    for (UINT32 i = 0; i < INS_MaxNumWRegs(ins); ++i)
-        if (IsStackReg(INS_RegW(ins, i))) return true;
-    return INS_IsStackRead(ins) || INS_IsStackWrite(ins);
+static inline bool TouchesStack(INS ins){
+    for (UINT32 i=0;i<INS_MaxNumRRegs(ins);++i)
+        if (IsStack(INS_RegR(ins,i))) return true;
+    for (UINT32 i=0;i<INS_MaxNumWRegs(ins);++i)
+        if (IsStack(INS_RegW(ins,i))) return true;
+    return INS_IsStackRead(ins)||INS_IsStackWrite(ins);
 }
-
-static inline bool Has64RegR(INS ins) {
-    for (UINT32 i = 0; i < INS_MaxNumRRegs(ins); ++i) {
-        REG r = INS_RegR(ins, i);
-        if (Is64Gpr(r) && !IsStackReg(r)) return true;
+static inline bool Has64R(INS ins){
+    for (UINT32 i=0;i<INS_MaxNumRRegs(ins);++i){
+        REG r=INS_RegR(ins,i); if (Is64Gpr(r)&&!IsStack(r)) return true;
     }
     return false;
 }
-
-static inline bool Has64RegW(INS ins) {
-    for (UINT32 i = 0; i < INS_MaxNumWRegs(ins); ++i) {
-        REG r = INS_RegW(ins, i);
-        if (Is64Gpr(r) && !IsStackReg(r)) return true;
+static inline bool Has64W(INS ins){
+    for (UINT32 i=0;i<INS_MaxNumWRegs(ins);++i){
+        REG r=INS_RegW(ins,i); if (Is64Gpr(r)&&!IsStack(r)) return true;
     }
     return false;
 }
-
-static inline bool MemRead8(INS ins) {
-    for (UINT32 i = 0; i < INS_MemoryOperandCount(ins); ++i)
-        if (INS_MemoryOperandIsRead(ins, i) &&
-            INS_MemoryOperandSize(ins, i) == 8) return true;
+static inline bool MemRead8(INS ins){
+    for (UINT32 i=0;i<INS_MemoryOperandCount(ins);++i)
+        if (INS_MemoryOperandIsRead(ins,i)&&INS_MemoryOperandSize(ins,i)==8) return true;
     return false;
 }
-
-static inline bool MemWrite8(INS ins) {
-    for (UINT32 i = 0; i < INS_MemoryOperandCount(ins); ++i)
-        if (INS_MemoryOperandIsWritten(ins, i) &&
-            INS_MemoryOperandSize(ins, i) == 8) return true;
+static inline bool MemWrite8(INS ins){
+    for (UINT32 i=0;i<INS_MemoryOperandCount(ins);++i)
+        if (INS_MemoryOperandIsWritten(ins,i)&&INS_MemoryOperandSize(ins,i)==8) return true;
     return false;
 }
-
-static inline bool Is64ALU(xed_iclass_enum_t opc) {
-    switch (opc) {
-        case XED_ICLASS_ADD:  case XED_ICLASS_SUB:
-        case XED_ICLASS_ADC:  case XED_ICLASS_SBB:
-        case XED_ICLASS_IMUL: case XED_ICLASS_MUL:
-        case XED_ICLASS_MULX:
-        case XED_ICLASS_ADCX: case XED_ICLASS_ADOX:
-        case XED_ICLASS_IDIV: case XED_ICLASS_DIV:
-            return true;
-        default:
-            return false;
+static inline bool Is64ALU(xed_iclass_enum_t o){
+    switch (o){
+        case XED_ICLASS_ADD: case XED_ICLASS_SUB: case XED_ICLASS_ADC:
+        case XED_ICLASS_SBB: case XED_ICLASS_IMUL:case XED_ICLASS_MUL:
+        case XED_ICLASS_MULX:case XED_ICLASS_ADCX:case XED_ICLASS_ADOX:
+        case XED_ICLASS_IDIV:case XED_ICLASS_DIV:  return true;
+        default: return false;
     }
 }
-
-static inline bool IsRegReg64(INS ins) {
-    return INS_MemoryOperandCount(ins) == 0 &&
-           !HasImm(ins) && !TouchesStack(ins) &&
-           Has64RegR(ins) && Has64RegW(ins);
+static inline bool RegReg64(INS ins){
+    return INS_MemoryOperandCount(ins)==0 && !HasImm(ins)&&!TouchesStack(ins)
+           &&Has64R(ins)&&Has64W(ins);
+}
+static inline bool RegMem64(INS ins){
+    if (HasImm(ins)||TouchesStack(ins)) return false;
+    bool mr  = MemRead8(ins)&&Has64W(ins)&&!MemWrite8(ins);
+    bool rmw = MemWrite8(ins)&&Has64R(ins);
+    return mr||rmw;
 }
 
-static inline bool IsRegMem64(INS ins) {
-    if (HasImm(ins) || TouchesStack(ins)) return false;
-    bool mr  = MemRead8(ins)  && Has64RegW(ins) && !MemWrite8(ins);
-    bool rmw = MemWrite8(ins) && Has64RegR(ins);          // count RMW
-    return mr || rmw;
-}
-
-//------------------------------------------------------------------------------
-//  Instrument every instruction once
-//------------------------------------------------------------------------------
+// ── instruction instrumentation ─────────────────────────────────────────────
 static VOID Instruction(INS ins, VOID*)
 {
-    // Region-start / region-stop hooks  (only needed in gated mode)
-    if (!g_wholeProg) {
-        if (INS_Address(ins) == g_startAddr)
-            INS_InsertCall(ins, IPOINT_BEFORE,
-                           (AFUNPTR)StartRegion, IARG_THREAD_ID, IARG_END);
-
-        if (INS_IsRet(ins))
-            INS_InsertCall(ins, IPOINT_BEFORE,
-                           (AFUNPTR)StopRegion, IARG_THREAD_ID, IARG_END);
-    }
-
-    // --- classify scalar 64-bit arithmetic -----------------------------------
     if (!Is64ALU(static_cast<xed_iclass_enum_t>(INS_Opcode(ins)))) return;
+    if (HasImm(ins)) return;
 
-    if (HasImm(ins)) return;              // skip immediates
-
-    bool rr = IsRegReg64(ins);
-    bool rm = !rr && IsRegMem64(ins);
+    bool rr = RegReg64(ins);
+    bool rm = !rr && RegMem64(ins);
     if (!rr && !rm) return;
 
-    // Select counter
     AFUNPTR fn = nullptr;
-    switch (INS_Opcode(ins)) {
-        case XED_ICLASS_ADD : fn = (AFUNPTR)(rr ? add_rr  : add_rm);  break;
-        case XED_ICLASS_SUB : fn = (AFUNPTR)(rr ? sub_rr  : sub_rm);  break;
-        case XED_ICLASS_ADC : fn = (AFUNPTR)(rr ? adc_rr  : adc_rm);  break;
-        case XED_ICLASS_SBB : fn = (AFUNPTR)(rr ? sbb_rr  : sbb_rm);  break;
-        case XED_ICLASS_MUL :
-        case XED_ICLASS_IMUL: fn = (AFUNPTR)(rr ? mul_rr  : mul_rm);  break;
-        case XED_ICLASS_MULX: fn = (AFUNPTR)(rr ? mulx_rr : mulx_rm); break;
-        case XED_ICLASS_ADCX: fn = (AFUNPTR)(rr ? adcx_rr : adcx_rm); break;
-        case XED_ICLASS_ADOX: fn = (AFUNPTR)(rr ? adox_rr : adox_rm); break;
-        case XED_ICLASS_DIV :
-        case XED_ICLASS_IDIV: fn = (AFUNPTR)(rr ? div_rr  : div_rm);  break;
+    switch (INS_Opcode(ins)){
+        case XED_ICLASS_ADD:  fn=(AFUNPTR)(rr?add_rr:add_rm);  break;
+        case XED_ICLASS_SUB:  fn=(AFUNPTR)(rr?sub_rr:sub_rm);  break;
+        case XED_ICLASS_ADC:  fn=(AFUNPTR)(rr?adc_rr:adc_rm);  break;
+        case XED_ICLASS_SBB:  fn=(AFUNPTR)(rr?sbb_rr:sbb_rm);  break;
+        case XED_ICLASS_MUL:
+        case XED_ICLASS_IMUL: fn=(AFUNPTR)(rr?mul_rr:mul_rm);  break;
+        case XED_ICLASS_MULX: fn=(AFUNPTR)(rr?mulx_rr:mulx_rm);break;
+        case XED_ICLASS_ADCX: fn=(AFUNPTR)(rr?adcx_rr:adcx_rm);break;
+        case XED_ICLASS_ADOX: fn=(AFUNPTR)(rr?adox_rr:adox_rm);break;
+        case XED_ICLASS_DIV:
+        case XED_ICLASS_IDIV: fn=(AFUNPTR)(rr?div_rr:div_rm);  break;
         default: return;
     }
-
     INS_InsertCall(ins, IPOINT_BEFORE, fn,
-                   IARG_FAST_ANALYSIS_CALL,
-                   IARG_THREAD_ID,
-                   IARG_END);
+                   IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_END);
 }
 
-//------------------------------------------------------------------------------
-//  Thread-start: allocate per-thread counter block
-//------------------------------------------------------------------------------
+// ── attach depth toggles to the target routine ──────────────────────────────
+static VOID ImageLoad(IMG img, VOID*)
+{
+    if (g_whole) return;          // nothing to do in whole‑program mode
+    static bool done=false; if (done) return;
+
+    if (g_addr < IMG_LowAddress(img) || g_addr >= IMG_HighAddress(img))
+        return;                   // not inside this image
+
+    RTN rtn = RTN_FindByAddress(g_addr);
+    if (!RTN_Valid(rtn)) return;
+
+    RTN_Open(rtn);
+    RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)Enter,
+                   IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_END);
+    RTN_InsertCall(rtn, IPOINT_AFTER,  (AFUNPTR)Exit,
+                   IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_END);
+    RTN_Close(rtn);
+
+    done = true;
+}
+
+// ── thread start / fini ─────────────────────────────────────────────────────
 static VOID ThreadStart(THREADID tid, CONTEXT*, INT32, VOID*)
 {
-    auto* blk = new Cnts;
-    PIN_SetThreadData(g_tlsCnts, blk, tid);
-    PIN_SetThreadData(g_tlsFlag, nullptr, tid);
+    auto* st = new ThreadState;
+    PIN_SetThreadData(tlsKey, st, tid);
 
-    PIN_GetLock(&g_lock, tid + 1);
-    g_all.push_back(blk);
+    PIN_GetLock(&g_lock, tid+1);
+    g_all.push_back(st);
     PIN_ReleaseLock(&g_lock);
 }
 
-//------------------------------------------------------------------------------
-//  Final report
-//------------------------------------------------------------------------------
 static VOID Fini(INT32, VOID*)
 {
-    Cnts sum{};
-    for (auto* c : g_all) {
-#define ACCUM(x)  sum.x += c->x
-        ACCUM(add_rr); ACCUM(sub_rr); ACCUM(adc_rr); ACCUM(sbb_rr);
-        ACCUM(mul_rr); ACCUM(mulx_rr); ACCUM(adcx_rr); ACCUM(adox_rr); ACCUM(div_rr);
-        ACCUM(add_rm); ACCUM(sub_rm); ACCUM(adc_rm); ACCUM(sbb_rm);
-        ACCUM(mul_rm); ACCUM(mulx_rm); ACCUM(adcx_rm); ACCUM(adox_rm); ACCUM(div_rm);
-        delete c;
+    Cnts s{};
+    for (auto* st : g_all){
+#define ACC(x) s.x += st->cnts.x
+        ACC(add_rr);  ACC(sub_rr);  ACC(adc_rr);  ACC(sbb_rr);
+        ACC(mul_rr);  ACC(mulx_rr); ACC(adcx_rr); ACC(adox_rr); ACC(div_rr);
+        ACC(add_rm);  ACC(sub_rm);  ACC(adc_rm);  ACC(sbb_rm);
+        ACC(mul_rm);  ACC(mulx_rm); ACC(adcx_rm); ACC(adox_rm); ACC(div_rm);
+        delete st;
     }
 
-    auto ADD = sum.add_rr + sum.add_rm + sum.adc_rr + sum.adc_rm +
-               sum.adcx_rr + sum.adcx_rm + sum.adox_rr + sum.adox_rm;
+    const auto ADD = s.add_rr + s.add_rm + s.adc_rr + s.adc_rm +
+                     s.adcx_rr + s.adcx_rm + s.adox_rr + s.adox_rm;
+    const auto SUB = s.sub_rr + s.sub_rm + s.sbb_rr + s.sbb_rm;
+    const auto MUL = s.mul_rr + s.mul_rm + s.mulx_rr + s.mulx_rm;
+    const auto DIV = s.div_rr + s.div_rm;
 
-    auto SUB = sum.sub_rr + sum.sub_rm + sum.sbb_rr + sum.sbb_rm;
-
-    auto MUL = sum.mul_rr + sum.mul_rm + sum.mulx_rr + sum.mulx_rm;
-
-    auto DIV = sum.div_rr + sum.div_rm;
-
-    std::cout << std::dec;
-    std::cout << "ADD: " << ADD << '\n'
-              << "SUB: " << SUB << '\n'
-              << "MUL: " << MUL << '\n'
-              << "DIV: " << DIV << '\n';
+    std::cout << "ADD: " << ADD << "\n"
+              << "SUB: " << SUB << "\n"
+              << "MUL: " << MUL << "\n"
+              << "DIV: " << DIV << std::endl;
 }
 
-//------------------------------------------------------------------------------
-//  Entry
-//------------------------------------------------------------------------------
+// ── main ─────────────────────────────────────────────────────────────────────
 int main(int argc, char* argv[])
 {
-    // Initialise Pin & knob
     PIN_Init(argc, argv);
 
     std::stringstream ss(knobAddr.Value());
-    ss >> std::hex >> g_startAddr;
-    g_wholeProg = (g_startAddr == 0);     // 0 ⇒ count entire run
+    ss >> std::hex >> g_addr;
+    g_whole = (g_addr == 0);
 
-    // TLS keys
     PIN_InitLock(&g_lock);
-    g_tlsCnts = PIN_CreateThreadDataKey(nullptr);
-    g_tlsFlag = PIN_CreateThreadDataKey(nullptr);
+    tlsKey = PIN_CreateThreadDataKey(nullptr);
 
-    // Register callbacks
     PIN_AddThreadStartFunction(ThreadStart, nullptr);
-    INS_AddInstrumentFunction(Instruction, nullptr);
-    PIN_AddFiniFunction(Fini, nullptr);
+    IMG_AddInstrumentFunction(ImageLoad,    nullptr);
+    INS_AddInstrumentFunction(Instruction,  nullptr);
+    PIN_AddFiniFunction(Fini,               nullptr);
 
-    PIN_StartProgram();   // never returns
+    PIN_StartProgram();
     return 0;
 }
