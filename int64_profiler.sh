@@ -36,7 +36,7 @@ if [[ "${1:-}" == "--" ]]; then shift; fi   # discard separator
 ###############################################################################
 PIN_ARGS=()
 if [[ -n "$FUNC" ]]; then
-  ADDR=$(nm "$TARGET" | awk -v f="$FUNC" '$3==f && $2~/^[Tt]$/{print $1; exit}')
+  ADDR=$(nm "$TARGET" | grep -E '[[:space:]](T|t)[[:space:]]'"$FUNC"'$' | awk '{print $1; exit}')
   [[ -n "$ADDR" ]] || { echo "Function '$FUNC' not found"; exit 1; }
   echo "📍  Profiling only $FUNC() @ 0x$ADDR"
   PIN_ARGS+=( -addr "0x$ADDR" )
