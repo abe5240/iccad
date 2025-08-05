@@ -1,23 +1,12 @@
+// Save this as ~/iccad/installation/int64_ops.cpp (streamlined version)
 // ─────────────────────────────────────────────────────────────────────────────
 // Int64Profiler.cpp  –  Intel® Pin 3.31
 //
-//   Counts 64‑bit *scalar* integer arithmetic instructions
-//   (ADD / SUB / ADC / SBB / MUL / IMUL / MULX / ADCX / ADOX / DIV / IDIV).
-//
-//   • Whole program            : default  (omit -addr)
-//   • Region‑scoped            : start counting at <addr>, stop at the first
-//                                RET that executes while the region is active.
-//
-//   Typical use:
-//       # whole run
-//       pin -t Int64Profiler.so -- ./app
-//
-//       # only the dynamic slice rooted at toBenchmark()
-//       ADDR=$(nm ./app | awk '$3=="toBenchmark"&&$2~/T/{print "0x"$1}')
-//       pin -t Int64Profiler.so -addr "$ADDR" -- ./app
-//
-//   Debugging:
-//       ... -dbg 1      # prints basic progress messages
+// Counts 64‑bit scalar integer arithmetic instructions
+// Supports three modes:
+//   1. Whole program (default)
+//   2. Address-based region (-addr 0xADDRESS)
+//   3. Marker-based region (-start NAME -stop NAME)
 // ─────────────────────────────────────────────────────────────────────────────
 #include "pin.H"
 #include <iostream>
@@ -29,11 +18,17 @@
 KNOB<std::string> knobAddr(KNOB_MODE_WRITEONCE, "pintool",
                            "addr", "0x0",
                            "Hex start address (0 → whole program)");
+KNOB<std::string> knobStart(KNOB_MODE_WRITEONCE, "pintool",
+                            "start", "",
+                            "Start marker function name");
+KNOB<std::string> knobStop(KNOB_MODE_WRITEONCE, "pintool",
+                           "stop", "",
+                           "Stop marker function name");
 KNOB<std::string> knobDbg(KNOB_MODE_WRITEONCE, "pintool",
                           "dbg",  "0",
                           "Debug verbosity (0‑silent, 1‑info, 2‑verbose)");
 
-static int g_dbg = 0;      // set once in main()
+static int g_dbg = 0;
 
 #define DBG(level, msg)                                               \
     do { if (g_dbg >= (level))                                        \
@@ -41,35 +36,36 @@ static int g_dbg = 0;      // set once in main()
 
 // ── per‑thread structures ───────────────────────────────────────────────────
 struct alignas(64) Cnts {
-    /* reg‑reg */
     UINT64 add_rr{}, sub_rr{}, adc_rr{}, sbb_rr{};
     UINT64 mul_rr{}, mulx_rr{}, adcx_rr{}, adox_rr{}, div_rr{};
-    /* reg ↔ mem (64‑bit operands only) */
     UINT64 add_rm{}, sub_rm{}, adc_rm{}, sbb_rm{};
     UINT64 mul_rm{}, mulx_rm{}, adcx_rm{}, adox_rm{}, div_rm{};
 };
 
 struct alignas(64) ThreadState {
     Cnts  cnts;
-    bool  active = false;      // counting flag
+    bool  active = false;
 };
 
 static TLS_KEY                     tlsKey;
 static PIN_LOCK                    g_lock;
-static std::vector<ThreadState*>   g_all;     // gather at fini
+static std::vector<ThreadState*>   g_all;
 
-// ── global options ──────────────────────────────────────────────────────────
-static ADDRINT g_start = 0;   // 0 → whole program
-static bool    g_whole = true;
+// Mode detection
+enum Mode { WHOLE, ADDRESS, MARKER };
+static Mode g_mode = WHOLE;
+static ADDRINT g_start_addr = 0;
+static std::string g_start_marker = "";
+static std::string g_stop_marker = "";
 
-// ── convenience helpers ─────────────────────────────────────────────────────
 static inline ThreadState* St(THREADID tid)
 {
     return static_cast<ThreadState*>(PIN_GetThreadData(tlsKey, tid));
 }
+
 static inline bool Counting(THREADID tid)
 {
-    return g_whole || St(tid)->active;
+    return g_mode == WHOLE || St(tid)->active;
 }
 
 // ── region toggles ─────────────────────────────────────────────────────────
@@ -78,6 +74,7 @@ static VOID StartRegion(THREADID tid)
     St(tid)->active = true;
     DBG(2, "StartRegion (tid=" << tid << ")");
 }
+
 static VOID StopRegion(THREADID tid)
 {
     if (St(tid)->active) {
@@ -86,7 +83,7 @@ static VOID StopRegion(THREADID tid)
     }
 }
 
-// ── fast counter stubs (one per bucket) ─────────────────────────────────────
+// ── fast counter stubs ─────────────────────────────────────────────────────
 #define DEF_COUNTER(name)                                             \
     static VOID PIN_FAST_ANALYSIS_CALL name(THREADID tid)             \
     { if (Counting(tid)) St(tid)->cnts.name++; }
@@ -108,6 +105,7 @@ static inline bool HasImm(INS ins)
         if (INS_OperandIsImmediate(ins, i)) return true;
     return false;
 }
+
 static inline bool TouchesStack(INS ins)
 {
     for (UINT32 i = 0; i < INS_MaxNumRRegs(ins); ++i)
@@ -116,6 +114,7 @@ static inline bool TouchesStack(INS ins)
         if (IsStack(INS_RegW(ins, i))) return true;
     return INS_IsStackRead(ins) || INS_IsStackWrite(ins);
 }
+
 static inline bool Has64R(INS ins)
 {
     for (UINT32 i = 0; i < INS_MaxNumRRegs(ins); ++i) {
@@ -124,6 +123,7 @@ static inline bool Has64R(INS ins)
     }
     return false;
 }
+
 static inline bool Has64W(INS ins)
 {
     for (UINT32 i = 0; i < INS_MaxNumWRegs(ins); ++i) {
@@ -132,6 +132,7 @@ static inline bool Has64W(INS ins)
     }
     return false;
 }
+
 static inline bool MemRead8(INS ins)
 {
     for (UINT32 i = 0; i < INS_MemoryOperandCount(ins); ++i)
@@ -139,6 +140,7 @@ static inline bool MemRead8(INS ins)
             INS_MemoryOperandSize(ins, i) == 8) return true;
     return false;
 }
+
 static inline bool MemWrite8(INS ins)
 {
     for (UINT32 i = 0; i < INS_MemoryOperandCount(ins); ++i)
@@ -146,6 +148,7 @@ static inline bool MemWrite8(INS ins)
             INS_MemoryOperandSize(ins, i) == 8) return true;
     return false;
 }
+
 static inline bool IsALU64(xed_iclass_enum_t opc)
 {
     switch (opc) {
@@ -158,17 +161,19 @@ static inline bool IsALU64(xed_iclass_enum_t opc)
             return false;
     }
 }
+
 static inline bool IsRegReg64(INS ins)
 {
     return INS_MemoryOperandCount(ins) == 0 &&
            !HasImm(ins) && !TouchesStack(ins) &&
            Has64R(ins) && Has64W(ins);
 }
+
 static inline bool IsRegMem64(INS ins)
 {
     if (HasImm(ins) || TouchesStack(ins)) return false;
     bool mr  = MemRead8(ins)  && Has64W(ins) && !MemWrite8(ins);
-    bool rmw = MemWrite8(ins) && Has64R(ins);          // count RMW as reg‑mem
+    bool rmw = MemWrite8(ins) && Has64R(ins);
     return mr || rmw;
 }
 
@@ -201,16 +206,42 @@ static VOID InstrumentArith(INS ins, VOID*)
                    IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_END);
 }
 
-// ── instrumentation – region start & stop ───────────────────────────────────
-static VOID InstrumentRegion(INS ins, VOID*)
+// ── instrumentation for marker functions (MARKER mode) ──────────────────────
+static VOID InstrumentMarkerRtn(RTN rtn, VOID*)
 {
-    /* start: exact address match */
-    if (!g_whole && INS_Address(ins) == g_start) {
+    if (g_mode != MARKER) return;
+    
+    std::string name = RTN_Name(rtn);
+    
+    if (name == g_start_marker) {
+        DBG(1, "Found start marker: " << name);
+        RTN_Open(rtn);
+        RTN_InsertCall(rtn, IPOINT_AFTER, (AFUNPTR)StartRegion,
+                      IARG_THREAD_ID, IARG_END);
+        RTN_Close(rtn);
+    }
+    
+    if (name == g_stop_marker) {
+        DBG(1, "Found stop marker: " << name);
+        RTN_Open(rtn);
+        RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)StopRegion,
+                      IARG_THREAD_ID, IARG_END);
+        RTN_Close(rtn);
+    }
+}
+
+// ── instrumentation for address-based regions (ADDRESS mode) ────────────────
+static VOID InstrumentAddressRegion(INS ins, VOID*)
+{
+    if (g_mode != ADDRESS) return;
+    
+    // Start at exact address
+    if (INS_Address(ins) == g_start_addr) {
         INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)StartRegion,
                        IARG_THREAD_ID, IARG_END);
     }
 
-    /* stop: first RET executed while region is active */
+    // Stop at first RET while active
     if (INS_IsRet(ins)) {
         INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)StopRegion,
                        IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_END);
@@ -256,26 +287,60 @@ static VOID Fini(INT32, VOID*)
 // ── main ─────────────────────────────────────────────────────────────────────
 int main(int argc, char* argv[])
 {
-    PIN_InitSymbols();             // enable symbol lookup for RTN names
+    PIN_InitSymbols();
     PIN_Init(argc, argv);
 
-    g_start = strtoull(knobAddr.Value().c_str(), nullptr, 0);
-    g_whole = (g_start == 0);
-    g_dbg   = std::atoi(knobDbg.Value().c_str());
+    g_dbg = std::atoi(knobDbg.Value().c_str());
+    
+    // Determine mode based on arguments
+    if (!knobStart.Value().empty()) {
+        // MARKER mode: use start/stop function names
+        g_mode = MARKER;
+        g_start_marker = knobStart.Value();
+        
+        // If stop not specified, derive it from start
+        if (knobStop.Value().empty()) {
+            // Convert start_profiling -> stop_profiling
+            if (g_start_marker.find("start_") == 0) {
+                g_stop_marker = "stop_" + g_start_marker.substr(6);
+            } else if (g_start_marker.find("begin_") == 0) {
+                g_stop_marker = "end_" + g_start_marker.substr(6);
+            } else {
+                g_stop_marker = "stop_profiling";  // Default fallback
+            }
+        } else {
+            g_stop_marker = knobStop.Value();
+        }
+        DBG(1, "MARKER mode: start=" << g_start_marker << " stop=" << g_stop_marker);
+        
+    } else if (knobAddr.Value() != "0x0" && knobAddr.Value() != "0") {
+        // ADDRESS mode: use specific address
+        g_mode = ADDRESS;
+        g_start_addr = strtoull(knobAddr.Value().c_str(), nullptr, 0);
+        DBG(1, "ADDRESS mode: start @ 0x" << std::hex << g_start_addr);
+        
+    } else {
+        // WHOLE program mode
+        g_mode = WHOLE;
+        DBG(1, "WHOLE program mode");
+    }
 
-    if (!g_whole) DBG(1, "region starts at 0x" << std::hex << g_start);
-    else          DBG(1, "whole‑program mode");
-
-    /* prepare TLS and locks */
     PIN_InitLock(&g_lock);
     tlsKey = PIN_CreateThreadDataKey(nullptr);
 
-    /* register callbacks */
-    PIN_AddThreadStartFunction(ThreadStart,   nullptr);
-    INS_AddInstrumentFunction (InstrumentRegion, nullptr);   // start/stop hooks
-    INS_AddInstrumentFunction (InstrumentArith,  nullptr);   // counting
-    PIN_AddFiniFunction       (Fini,           nullptr);
+    PIN_AddThreadStartFunction(ThreadStart, nullptr);
+    
+    // Add appropriate instrumentation based on mode
+    if (g_mode == MARKER) {
+        RTN_AddInstrumentFunction(InstrumentMarkerRtn, nullptr);
+    } else if (g_mode == ADDRESS) {
+        INS_AddInstrumentFunction(InstrumentAddressRegion, nullptr);
+    }
+    
+    // Always instrument arithmetic operations
+    INS_AddInstrumentFunction(InstrumentArith, nullptr);
+    PIN_AddFiniFunction(Fini, nullptr);
 
-    PIN_StartProgram();     // never returns
+    PIN_StartProgram();
     return 0;
 }

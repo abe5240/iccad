@@ -6,6 +6,7 @@
 #
 #   • If <function> is omitted → count the whole program
 #   • If provided  → counts only inside that symbol using -addr 0x…
+#   • If function starts with "start_" or "begin_" → use marker mode
 ###############################################################################
 set -euo pipefail
 
@@ -36,14 +37,22 @@ if [[ "${1:-}" == "--" ]]; then shift; fi   # discard separator
 ###############################################################################
 PIN_ARGS=()
 if [[ -n "$FUNC" ]]; then
-  ADDR=$(nm "$TARGET" | grep -E '[[:space:]](T|t)[[:space:]]'"$FUNC"'$' | awk '{print $1; exit}')
-  [[ -n "$ADDR" ]] || { echo "Function '$FUNC' not found"; exit 1; }
-  echo "📍  Profiling only $FUNC() @ 0x$ADDR"
-  PIN_ARGS+=( -addr "0x$ADDR" )
+  # Check if this is a marker function
+  if [[ "$FUNC" == start_* ]] || [[ "$FUNC" == begin_* ]]; then
+    echo "📍  Using marker mode for $FUNC()"
+    PIN_ARGS+=( -start "$FUNC" )
+    # Tool will auto-derive stop marker name
+  else
+    # Original address-based logic
+    ADDR=$(nm "$TARGET" | grep -E '[[:space:]](T|t)[[:space:]]'"$FUNC"'$' | awk '{print $1; exit}')
+    [[ -n "$ADDR" ]] || { echo "Function '$FUNC' not found"; exit 1; }
+    echo "📍  Profiling only $FUNC() @ 0x$ADDR"
+    PIN_ARGS+=( -addr "0x$ADDR" )
+  fi
 else
   echo "📍  Profiling entire process"
 fi
-(( VERBOSE )) && PIN_ARGS+=( -verbose 1 )
+(( VERBOSE )) && PIN_ARGS+=( -dbg 2 )
 
 ###############################################################################
 # 4. run Pin
